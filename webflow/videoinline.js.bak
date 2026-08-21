@@ -1,0 +1,570 @@
+(function () {
+  const init = () => {
+    // Skip the live-site reset while editing in the Webflow Designer/Editor so
+    // every element stays visible and selectable on canvas.
+    const inWebflowEditor =
+      document.documentElement.classList.contains('wf-design-mode') ||
+      document.documentElement.classList.contains('w-editor') ||
+      window.Webflow?.env?.('design') ||
+      window.Webflow?.env?.('editor');
+
+    // FIX: players are found document-wide. The old code required a
+    // `.videoinline_wrap` ancestor, which does not exist in the published
+    // markup, so the entire script silently did nothing.
+    document.querySelectorAll('[data-videoinline-player]').forEach((player) => {
+      // FIX: the init guard belongs on the player, not on a shared wrapper.
+      if (player.dataset.scriptInitialized) return;
+      player.dataset.scriptInitialized = 'true';
+
+      const q = (sel) => player.querySelector(sel);
+      const qa = (sel) => player.querySelectorAll(sel);
+
+      const video = q('[data-videoinline-video]');
+      if (!video) return; // nothing to control
+
+      const posterImg = q('[data-videoinline-poster-img]');
+      const preview = q('[data-videoinline-preview]');
+      const playpauseButtons = qa('[data-videoinline-playpause]');
+      const muteButton = q('[data-videoinline-mute]');
+      const fullscreenButton = q('[data-videoinline-fullscreen]');
+      const timeline = q('[data-videoinline-timeline]');
+      const progressBar = q('[data-videoinline-progress]');
+      const bufferedBar = q('[data-videoinline-buffered]');
+      const handle = q('[data-videoinline-handle]');
+      const progressText = q('[data-videoinline-progress-text]');
+      const durationText = q('[data-videoinline-duration-text]');
+      const posterTime = q('[data-videoinline-poster-time]');
+      const loading = q('[data-videoinline-loading]');
+      const volumeSlider = q('[data-videoinline-volume]');
+      const volumeFill = q('[data-videoinline-volume-fill]');
+
+      const playIcons = qa('.videoinline_play_icon');
+      const pauseIcons = qa('.videoinline_pause_icon');
+      const volumeUpIcon = q('.videoinline_volume_up_icon');
+      const volumeMuteIcon = q('.videoinline_volume_mute_icon');
+      const maximiseIcon = q('.videoinline_fullscreen_maximise');
+      const minimiseIcon = q('.videoinline_fullscreen_minimise');
+
+      // Bunny Stream pull zone for GUID-based videos — same zone as the popup.
+      const bunnyPullZone = 'vz-68927fba-cee.b-cdn.net';
+      const hlsJsUrl = 'https://cdn.jsdelivr.net/npm/hls.js@1.5.8/dist/hls.min.js';
+
+      // FIX: an inline player must declare playsinline, or iOS Safari hijacks
+      // the first play into native fullscreen. preload=metadata lets duration
+      // and the first frame resolve before playback.
+      video.setAttribute('playsinline', '');
+      video.setAttribute('webkit-playsinline', '');
+      video.setAttribute('disablepictureinpicture', '');
+      if (!video.hasAttribute('preload')) video.setAttribute('preload', 'metadata');
+
+      // --- Bunny Stream / HLS helpers ---------------------------------
+      const buildSources = (guid) => {
+        const base = `https://${bunnyPullZone}/${guid}`;
+        return {
+          hls: `${base}/playlist.m3u8`,
+          poster: `${base}/thumbnail.jpg`,
+          preview: `${base}/preview.webp`,
+          mp4: `${base}/play_1080p.mp4`
+        };
+      };
+
+      let loadedSrc = null;
+      let currentHls = null;
+      let hlsLoadedPromise = null;
+      let previewLoaded = false;
+      let sourcePromise = null;
+
+      const loadHlsJs = () => {
+        if (window.Hls) return Promise.resolve(window.Hls);
+        if (hlsLoadedPromise) return hlsLoadedPromise;
+        hlsLoadedPromise = new Promise((resolve, reject) => {
+          // Reuse a tag another component already added.
+          let script = document.querySelector(`script[src="${hlsJsUrl}"]`);
+          if (!script) {
+            script = document.createElement('script');
+            script.src = hlsJsUrl;
+            script.async = true;
+            document.head.appendChild(script);
+          }
+          script.addEventListener('load', () => resolve(window.Hls));
+          script.addEventListener('error', () => reject(new Error('Failed to load hls.js')));
+        });
+        return hlsLoadedPromise;
+      };
+
+      // FIX: `as` is only valid on rel=preload; rel=prefetch with as="auto"
+      // is ignored and warns in Chrome.
+      const prefetchResource = (url) => {
+        if (!url) return;
+        if (document.querySelector(`link[rel="prefetch"][href="${url}"]`)) return;
+        const link = document.createElement('link');
+        link.rel = 'prefetch';
+        link.href = url;
+        document.head.appendChild(link);
+      };
+
+      const destroyHls = () => {
+        if (currentHls) {
+          currentHls.destroy();
+          currentHls = null;
+        }
+      };
+
+      const fallbackToMp4 = (guid) => {
+        destroyHls();
+        if (!guid) {
+          console.error('[videoinline] HLS failed and no GUID is available for MP4 fallback');
+          return;
+        }
+        video.src = buildSources(guid).mp4 + '#t=0.1';
+        video.load();
+      };
+
+      // --- State ------------------------------------------------------
+      // idle    → poster + WATCH overlay, no source attached
+      // playing → transport controls, poster overlay hidden
+      // paused  → started but stopped; transport controls stay visible
+      const setState = (state) => {
+        player.setAttribute('data-videoinline-state', state);
+        const playing = state === 'playing';
+        const started = state !== 'idle';
+
+        playIcons.forEach((el) => {
+          el.style.display = playing ? 'none' : 'block';
+        });
+        pauseIcons.forEach((el) => {
+          el.style.display = playing ? 'block' : 'none';
+        });
+
+        // A private variable rather than the framework's --_state---*, so the
+        // Lumos state manager keeps full control of its own variables here.
+        player.style.setProperty('--videoinline--idle', started ? '0' : '1');
+        player.style.setProperty('--videoinline--poster-events', started ? 'none' : 'auto');
+        player.style.setProperty('--videoinline--interface-opacity', started ? '1' : '0');
+        player.style.setProperty('--videoinline--interface-events', started ? 'auto' : 'none');
+        // Big centre button: hidden while playing, shown when paused mid-video.
+        player.style.setProperty('--videoinline--bigbtn-opacity', playing ? '0' : started ? '1' : '0');
+        player.style.setProperty('--videoinline--bigbtn-events', !playing && started ? 'auto' : 'none');
+      };
+
+      const setLoading = (on) => {
+        if (!loading) return;
+        loading.style.opacity = on ? '1' : '0';
+        loading.style.visibility = on ? 'visible' : 'hidden';
+      };
+
+      // --- Time formatting --------------------------------------------
+      const pad2 = (n) => (n < 10 ? '0' : '') + n;
+      const formatTime = (sec) => {
+        if (!isFinite(sec) || sec < 0) return '00:00';
+        const s = Math.floor(sec);
+        const h = Math.floor(s / 3600);
+        const m = Math.floor((s % 3600) / 60);
+        const r = s % 60;
+        return h > 0 ? `${h}:${pad2(m)}:${pad2(r)}` : `${pad2(m)}:${pad2(r)}`;
+      };
+
+      const updateTimeText = () => {
+        if (progressText) progressText.textContent = formatTime(video.currentTime);
+        if (durationText) durationText.textContent = formatTime(video.duration);
+      };
+
+      const updateProgressVisuals = () => {
+        if (!video.duration) return;
+        const pct = (video.currentTime / video.duration) * 100;
+        if (progressBar) progressBar.style.transform = `translateX(${-100 + pct}%)`;
+        if (handle) handle.style.left = `${pct}%`;
+      };
+
+      // --- Poster + animated preview ----------------------------------
+      // FIX: an explicit data-videoinline-poster now works on its own. The old
+      // version bailed out before reading it whenever there was no GUID.
+      const posterSrc = () => {
+        const guid = player.getAttribute('data-videoinline-id');
+        return (
+          player.getAttribute('data-videoinline-poster-src') ||
+          (guid ? buildSources(guid).poster : null)
+        );
+      };
+
+      // FIX: the thumbnail now lives on a dedicated <img> layer. The <video>
+      // `poster` attribute is only honoured before playback has ever started —
+      // after `ended` the element paints its current frame and ignores any new
+      // poster value, which is why the thumbnail never came back. The <img>
+      // is under our control in every state, so we set both: the attribute
+      // covers the first paint before the image decodes, the layer covers
+      // everything after.
+      const setPoster = () => {
+        const poster = posterSrc();
+        if (poster) {
+          if (posterImg && posterImg.getAttribute('src') !== poster) posterImg.src = poster;
+          if (!video.currentSrc && !video.src) video.poster = poster;
+        } else if (posterImg) {
+          posterImg.removeAttribute('src');
+        }
+      };
+
+      // The animated webp is only fetched on first hover, so the poster state
+      // stays cheap for pages holding many players.
+      const loadPreview = () => {
+        if (previewLoaded || !preview) return;
+        const guid = player.getAttribute('data-videoinline-id');
+        const src = player.getAttribute('data-videoinline-preview-src') || (guid ? buildSources(guid).preview : null);
+        if (!src) return;
+        previewLoaded = true;
+        preview.src = src;
+      };
+
+      const warm = () => {
+        loadPreview();
+        const guid = player.getAttribute('data-videoinline-id');
+        if (!guid) return;
+        prefetchResource(hlsJsUrl);
+        prefetchResource(buildSources(guid).hls);
+      };
+
+      // --- Source loading ---------------------------------------------
+      const attachSource = async () => {
+        const guid = player.getAttribute('data-videoinline-id');
+        let raw = player.getAttribute('data-videoinline-src');
+
+        // GUID-based Bunny Stream source takes precedence.
+        if (guid) raw = buildSources(guid).hls;
+
+        if (!raw) return;
+        if (loadedSrc === raw) return; // same video, already attached
+
+        destroyHls();
+        loadedSrc = raw;
+        video.removeAttribute('src');
+
+        // The thumbnail is the <img> layer's job now; drop the attribute so the
+        // element never flashes a stale poster mid-swap.
+        video.removeAttribute('poster');
+        setPoster();
+
+        const isHls = raw.endsWith('.m3u8') || raw.includes('/playlist.m3u8');
+        if (!isHls) {
+          // The #t=0.1 media fragment forces the browser to range-request,
+          // decode and PAINT that frame while paused.
+          video.src = raw.indexOf('#') === -1 ? raw + '#t=0.1' : raw;
+          video.load();
+          return;
+        }
+
+        // HLS path: native HLS first on Safari/iOS, then hls.js, then MP4.
+        if (video.canPlayType('application/vnd.apple.mpegurl')) {
+          video.src = raw;
+          video.load();
+          return;
+        }
+
+        try {
+          const Hls = await loadHlsJs();
+          if (Hls && Hls.isSupported()) {
+            currentHls = new Hls({
+              capLevelToPlayerSize: true,
+              maxMaxBufferLength: 30,
+              maxBufferLength: 30,
+              backBufferLength: 30
+            });
+            currentHls.on(Hls.Events.ERROR, (_event, data) => {
+              if (!data.fatal) return;
+              switch (data.type) {
+                case Hls.ErrorTypes.NETWORK_ERROR:
+                  currentHls.startLoad();
+                  break;
+                case Hls.ErrorTypes.MEDIA_ERROR:
+                  currentHls.recoverMediaError();
+                  break;
+                default:
+                  fallbackToMp4(guid);
+              }
+            });
+            // attachMedia() MUST be called before loadSource().
+            currentHls.on(Hls.Events.MEDIA_ATTACHED, () => currentHls.loadSource(raw));
+            currentHls.attachMedia(video);
+          } else {
+            fallbackToMp4(guid);
+          }
+        } catch (e) {
+          fallbackToMp4(guid);
+        }
+      };
+
+      // Guarantees one in-flight attach even under rapid clicks.
+      const loadSource = () => {
+        if (!sourcePromise) {
+          sourcePromise = attachSource().finally(() => {
+            sourcePromise = null;
+          });
+        }
+        return sourcePromise;
+      };
+
+      // --- Play / pause ------------------------------------------------
+      const safePlay = () => {
+        const p = video.play();
+        if (p && typeof p.then === 'function') p.catch(() => {});
+      };
+
+      const togglePlay = async () => {
+        // Show the loader while hls.js is fetched and attached on first play.
+        if (!loadedSrc) setLoading(true);
+        await loadSource();
+        if (video.paused || video.ended) {
+          // Replay after a finished video: rewind first, otherwise play()
+          // resumes at the very end and immediately fires `ended` again.
+          if (video.ended || video.currentTime >= video.duration) video.currentTime = 0;
+          // Only show the spinner if data is actually still missing, otherwise
+          // it flashes over the already-painted first frame.
+          if (video.readyState < 3) setLoading(true);
+          safePlay();
+        } else {
+          video.pause();
+        }
+      };
+
+      playpauseButtons.forEach((btn) => btn.addEventListener('click', togglePlay));
+
+      // --- Single-playback coordination ---------------------------------
+      // Only one inline video plays at a time. A document-level event is used
+      // rather than a shared registry so this keeps working for players the
+      // CMS/popup injects after load — each new instance simply starts
+      // listening, and nothing has to be unregistered when one goes away.
+      const PLAY_EVENT = 'videoinline:play';
+
+      document.addEventListener(PLAY_EVENT, (e) => {
+        if (e.detail === player) return; // this is the one that just started
+        if (!video.paused) video.pause();
+      });
+
+      video.addEventListener('play', () => {
+        setState('playing');
+        // Fires on `play`, not in togglePlay, so autoplay or a programmatic
+        // play() also stops the others.
+        document.dispatchEvent(new CustomEvent(PLAY_EVENT, { detail: player }));
+      });
+      video.addEventListener('playing', () => {
+        setLoading(false);
+        setState('playing');
+      });
+      video.addEventListener('pause', () => {
+        if (!video.ended) setState('paused');
+      });
+      video.addEventListener('waiting', () => setLoading(true));
+      video.addEventListener('canplay', () => setLoading(false));
+      video.addEventListener('loadeddata', () => setLoading(false));
+
+      // On end, return to the idle state: the poster <img> fades back in and
+      // covers the video element, so it does not matter what frame the video is
+      // parked on. Rewinding to 0 keeps the transport controls honest if the
+      // user scrubs or hits play again.
+      video.addEventListener('ended', () => {
+        setPoster();
+        setState('idle');
+        setLoading(false);
+        try {
+          video.currentTime = 0;
+        } catch (e) {
+          /* seeking can throw if metadata is gone; the poster still covers it */
+        }
+        if (progressBar) progressBar.style.transform = 'translateX(-100%)';
+        if (handle) handle.style.left = '0%';
+        if (progressText) progressText.textContent = formatTime(0);
+      });
+
+      // --- Mute + volume ------------------------------------------------
+      const syncMuteIcons = () => {
+        const muted = video.muted || video.volume === 0;
+        if (volumeUpIcon) volumeUpIcon.style.display = muted ? 'none' : 'block';
+        if (volumeMuteIcon) volumeMuteIcon.style.display = muted ? 'block' : 'none';
+      };
+
+      const syncVolumeFill = () => {
+        if (!volumeFill) return;
+        const pct = video.muted ? 0 : video.volume;
+        volumeFill.style.transform = `scaleX(${pct})`;
+      };
+
+      if (muteButton) {
+        muteButton.addEventListener('click', () => {
+          video.muted = !video.muted;
+        });
+      }
+
+      video.addEventListener('volumechange', () => {
+        syncMuteIcons();
+        syncVolumeFill();
+      });
+
+      if (volumeSlider) {
+        const setVolumeFromX = (clientX) => {
+          const rect = volumeSlider.getBoundingClientRect();
+          let f = (clientX - rect.left) / rect.width;
+          f = Math.min(1, Math.max(0, f));
+          video.volume = f;
+          video.muted = f === 0;
+        };
+
+        let volDragging = false;
+        volumeSlider.addEventListener('pointerdown', (e) => {
+          volDragging = true;
+          volumeSlider.setPointerCapture?.(e.pointerId);
+          setVolumeFromX(e.clientX);
+        });
+        volumeSlider.addEventListener('pointermove', (e) => {
+          if (volDragging) setVolumeFromX(e.clientX);
+        });
+        const endVol = () => {
+          volDragging = false;
+        };
+        volumeSlider.addEventListener('pointerup', endVol);
+        volumeSlider.addEventListener('pointercancel', endVol);
+      }
+
+      syncMuteIcons();
+      syncVolumeFill();
+
+      // --- Fullscreen ---------------------------------------------------
+      const syncFullscreenIcons = () => {
+        const active =
+          document.fullscreenElement === player || document.webkitFullscreenElement === player;
+        if (maximiseIcon) maximiseIcon.style.display = active ? 'none' : 'block';
+        if (minimiseIcon) minimiseIcon.style.display = active ? 'block' : 'none';
+      };
+
+      if (fullscreenButton) {
+        fullscreenButton.addEventListener('click', () => {
+          const active = document.fullscreenElement || document.webkitFullscreenElement;
+          if (active) {
+            (document.exitFullscreen || document.webkitExitFullscreen)?.call(document);
+          } else if (player.requestFullscreen || player.webkitRequestFullscreen) {
+            (player.requestFullscreen || player.webkitRequestFullscreen).call(player);
+          } else if (video.webkitEnterFullscreen) {
+            // iPhone Safari: only the video element can go fullscreen.
+            video.webkitEnterFullscreen();
+          }
+        });
+      }
+
+      document.addEventListener('fullscreenchange', syncFullscreenIcons);
+      document.addEventListener('webkitfullscreenchange', syncFullscreenIcons);
+      syncFullscreenIcons();
+
+      // --- Time text + progress -----------------------------------------
+      video.addEventListener('loadedmetadata', updateTimeText);
+      video.addEventListener('durationchange', updateTimeText);
+      video.addEventListener('timeupdate', updateTimeText);
+
+      // Fill the poster duration label from the real metadata once known.
+      video.addEventListener('durationchange', () => {
+        if (posterTime && isFinite(video.duration) && video.duration > 0) {
+          posterTime.textContent = formatTime(video.duration);
+        }
+      });
+
+      let rafId;
+      const loop = () => {
+        updateProgressVisuals();
+        if (!video.paused && !video.ended) rafId = requestAnimationFrame(loop);
+      };
+      video.addEventListener('play', () => {
+        cancelAnimationFrame(rafId);
+        loop();
+      });
+      video.addEventListener('pause', () => {
+        cancelAnimationFrame(rafId);
+        updateProgressVisuals();
+      });
+
+      const updateBuffered = () => {
+        if (!bufferedBar || !video.duration || !video.buffered.length) return;
+        const end = video.buffered.end(video.buffered.length - 1);
+        bufferedBar.style.transform = `translateX(${-100 + (end / video.duration) * 100}%)`;
+      };
+      video.addEventListener('progress', updateBuffered);
+      video.addEventListener('durationchange', updateBuffered);
+
+      // --- Seeking (pointer) --------------------------------------------
+      if (timeline) {
+        let dragging = false;
+        let wasPlaying = false;
+
+        const fractionFromX = (clientX) => {
+          const rect = timeline.getBoundingClientRect();
+          const f = (clientX - rect.left) / rect.width;
+          return Math.min(1, Math.max(0, f));
+        };
+
+        const previewAt = (f) => {
+          const pct = f * 100;
+          if (progressBar) progressBar.style.transform = `translateX(${-100 + pct}%)`;
+          if (handle) handle.style.left = `${pct}%`;
+          if (progressText && video.duration) progressText.textContent = formatTime(f * video.duration);
+        };
+
+        timeline.addEventListener('pointerdown', (e) => {
+          if (!video.duration) return;
+          dragging = true;
+          wasPlaying = !video.paused && !video.ended;
+          if (wasPlaying) video.pause();
+          player.setAttribute('data-videoinline-drag', 'true');
+          if (handle) handle.style.transform = 'translate(-50%, -50%) scale(1)';
+          timeline.setPointerCapture?.(e.pointerId);
+          previewAt(fractionFromX(e.clientX));
+        });
+        timeline.addEventListener('pointermove', (e) => {
+          if (dragging) previewAt(fractionFromX(e.clientX));
+        });
+        const endDrag = (e) => {
+          if (!dragging) return;
+          dragging = false;
+          player.setAttribute('data-videoinline-drag', 'false');
+          if (handle) handle.style.transform = 'translate(-50%, -50%) scale(0)';
+          video.currentTime = fractionFromX(e.clientX) * video.duration;
+          if (wasPlaying) safePlay();
+          else {
+            updateProgressVisuals();
+            updateTimeText();
+          }
+        };
+        timeline.addEventListener('pointerup', endDrag);
+        timeline.addEventListener('pointercancel', endDrag);
+      }
+
+      // --- Hover: load the animated preview, wake the controls -----------
+      let hoverTimer;
+      const wake = () => {
+        player.setAttribute('data-videoinline-hover', 'active');
+        clearTimeout(hoverTimer);
+        hoverTimer = setTimeout(() => player.setAttribute('data-videoinline-hover', 'idle'), 3000);
+      };
+      player.addEventListener('pointerenter', warm);
+      player.addEventListener('focusin', warm);
+      player.addEventListener('pointermove', wake);
+      player.addEventListener('pointerleave', () => {
+        clearTimeout(hoverTimer);
+        player.setAttribute('data-videoinline-hover', 'idle');
+      });
+
+      // --- Init -----------------------------------------------------------
+      if (!inWebflowEditor) {
+        setPoster();
+        setState('idle');
+        setLoading(false);
+      }
+    });
+  };
+
+  // FIX: if this file is ever loaded async/deferred or injected late, a bare
+  // DOMContentLoaded listener never fires and the whole script no-ops.
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init);
+  } else {
+    init();
+  }
+
+  // Re-scan for players Webflow/CMS/popup code injects after load.
+  window.addEventListener('load', init);
+})();
