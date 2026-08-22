@@ -1,0 +1,46 @@
+---
+interface Props {
+  as?: 'header' | 'footer';
+}
+
+const { as: Tag = 'header' } = Astro.props;
+---
+
+<Tag class:list={['site-bar', 'container', { 'site-bar--footer': Tag === 'footer' }]}>
+  <a class="brand" href="/">Verbatim</a>
+  <nav class="bar-nav" aria-label={Tag === 'footer' ? 'Footer' : 'Primary'}>
+    <a href="#" class="label">Donate</a>
+    <a href="#" class="label">About</a>
+  </nav>
+</Tag>
+
+<style>
+  .site-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding-block: 26px;
+  }
+
+  .site-bar--footer {
+    margin-top: clamp(64px, 9vw, 120px);
+    padding-block: 34px;
+  }
+
+  .brand {
+    font-size: 16px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.18em;
+  }
+
+  .bar-nav {
+    display: flex;
+    gap: clamp(20px, 3vw, 40px);
+  }
+
+  .bar-nav a:hover {
+    text-decoration: underline;
+    text-underline-offset: 4px;
+  }
+</style>

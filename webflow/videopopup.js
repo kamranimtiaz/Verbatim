@@ -28,6 +28,41 @@
  * ---------------------------------------------------------------------------
  */
 (function () {
+  // --- Shared scroll lock ------------------------------------------------------
+  // Installed by whichever popup script runs first; both use the same counter so
+  // closing one popup can't unlock the page while another is still open.
+  // Mirrors the .hero-intro-lock rule in webflow.js.
+  (function () {
+    if (window.__popupScrollLock) return;
+
+    var depth = 0;
+    var scrollY = 0;
+
+    var style = document.createElement('style');
+    style.setAttribute('data-popup-scroll-lock', '');
+    style.textContent =
+      'html.popup-scroll-lock, html.popup-scroll-lock body { overflow: hidden; }' +
+      // position:fixed is what actually holds iOS still; overflow alone is ignored.
+      'html.popup-scroll-lock body { position: fixed; width: 100%; touch-action: none; }';
+    (document.head || document.documentElement).appendChild(style);
+
+    window.__popupScrollLock = {
+      lock: function () {
+        if (++depth > 1) return;
+        scrollY = window.scrollY || window.pageYOffset || 0;
+        document.body.style.top = -scrollY + 'px';
+        document.documentElement.classList.add('popup-scroll-lock');
+      },
+      unlock: function () {
+        if (depth === 0 || --depth > 0) return;
+        document.documentElement.classList.remove('popup-scroll-lock');
+        document.body.style.top = '';
+        // body was fixed, so the page jumped to the top — put it back.
+        window.scrollTo(0, scrollY);
+      }
+    };
+  })();
+
   const CARD = '[data-player]';
   const INLINE_FLAG = '[data-videoinline-player]';
   const WATCH = '[data-card-watch]';
@@ -748,6 +783,7 @@
         if (isOpen) return;
         isOpen = true;
         lastFocused = document.activeElement;
+        window.__popupScrollLock.lock();
         activeOpener = opener || null;
 
         applyOpener(opener);
@@ -790,6 +826,7 @@
       const closePopup = () => {
         if (!isOpen) return;
         isOpen = false;
+        window.__popupScrollLock.unlock();
         video.pause();
 
         exitFullscreenIfActive();

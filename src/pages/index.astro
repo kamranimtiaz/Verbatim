@@ -1,0 +1,272 @@
+---
+import Base from '../layouts/Base.astro';
+import Header from '../components/Header.astro';
+import MediaFigure from '../components/MediaFigure.astro';
+import StoryModal from '../components/StoryModal.astro';
+import { stories, getStory } from '../data/stories';
+
+const donations = getStory('illegal-donations');
+const thinkTank = getStory('corrupt-think-tank');
+const videos = ['video-01', 'video-02', 'video-03'].map(getStory);
+const articles = ['article-01', 'article-02', 'article-03', 'article-04'].map(getStory);
+---
+
+<Base title="Verbatim — Illegal Donations in Project 2025">
+  <Header />
+
+  <main>
+    <!-- Lead story -->
+    <section id="donations" class="story-hero">
+      <div class="hero-copy container">
+        <h1 class="hero-title">{donations.title}</h1>
+        <p class="hero-desc">{donations.description}</p>
+      </div>
+      <MediaFigure story={donations} variant="hero" priority />
+    </section>
+
+    <!-- Section tabs -->
+    <nav class="tabs container" aria-label="Investigations">
+      <a class="pill label is-active" href="#donations">{donations.title}</a>
+      <a class="pill label" href="#think-tank">{thinkTank.title}</a>
+      <a class="pill label" href="#overview">Overview</a>
+    </nav>
+
+    <!-- Second story -->
+    <section id="think-tank" class="story-hero">
+      <div class="cream-band">
+        <div class="hero-copy container">
+          <h2 class="hero-title">{thinkTank.title}</h2>
+          <p class="hero-desc">{thinkTank.description}</p>
+        </div>
+      </div>
+      <MediaFigure story={thinkTank} variant="hero" />
+    </section>
+
+    <!-- Full investigation -->
+    <section id="overview" class="section container">
+      <h2 class="section-heading label">Full Investigation</h2>
+      <div class="grid grid--2">
+        {
+          [donations, thinkTank].map((s) => (
+            <article class="card">
+              <MediaFigure story={s} variant="card" />
+              <h3 class="card-title">{s.title}</h3>
+              <p class="card-date label">{s.date}</p>
+            </article>
+          ))
+        }
+      </div>
+    </section>
+
+    <!-- Articles -->
+    <section class="section container">
+      <h2 class="section-heading label">Articles</h2>
+      <ul class="article-list">
+        {
+          articles.map((a) => (
+            <li>
+              <button class="article-row" data-story={a.slug} data-mode="read">
+                <span class="article-title">{a.title}</span>
+                <span class="article-read label">Read</span>
+              </button>
+            </li>
+          ))
+        }
+      </ul>
+    </section>
+
+    <!-- Videos -->
+    <section class="section container">
+      <h2 class="section-heading section-heading--ruled label">Videos</h2>
+      <div class="grid grid--3">
+        {
+          videos.map((v) => (
+            <article class="card">
+              <MediaFigure story={v} variant="thumb" />
+              <h3 class="card-title card-title--sm">{v.title}</h3>
+              <p class="card-date label">{v.date}</p>
+            </article>
+          ))
+        }
+      </div>
+    </section>
+  </main>
+
+  <Header as="footer" />
+
+  <StoryModal stories={stories} />
+</Base>
+
+<script>
+  import { initEmergingImages } from '../scripts/emerging-images';
+
+  initEmergingImages();
+
+  // Highlight the active section pill on click
+  const pills = document.querySelectorAll<HTMLElement>('.tabs .pill');
+  pills.forEach((pill) => {
+    pill.addEventListener('click', () => {
+      pills.forEach((p) => p.classList.toggle('is-active', p === pill));
+    });
+  });
+</script>
+
+<style>
+  section {
+    scroll-margin-top: 16px;
+  }
+
+  /* --- Story heroes --- */
+  .hero-copy {
+    padding-block: 6px 30px;
+  }
+
+  .hero-title {
+    font-size: clamp(17px, 1.9vw, 23px);
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    line-height: 1.3;
+    margin-bottom: 14px;
+  }
+
+  .hero-desc {
+    max-width: 58ch;
+    font-size: 11.5px;
+    font-weight: 400;
+    text-transform: uppercase;
+    letter-spacing: 0.09em;
+    line-height: 1.65;
+    opacity: 0.92;
+  }
+
+  .cream-band {
+    background: var(--cream);
+    color: var(--green);
+  }
+
+  .cream-band .hero-copy {
+    padding-block: 44px 40px;
+  }
+
+  .cream-band .hero-desc {
+    max-width: 52ch;
+    opacity: 1;
+  }
+
+  /* --- Tabs --- */
+  .tabs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    padding-block: 22px;
+  }
+
+  .pill {
+    display: inline-block;
+    padding: 9px 16px 8px;
+    border: 1px solid rgba(242, 241, 232, 0.75);
+    border-radius: 999px;
+    transition: background 0.15s ease, color 0.15s ease;
+  }
+
+  .pill:hover {
+    border-color: var(--cream);
+  }
+
+  .pill.is-active {
+    background: var(--cream);
+    border-color: var(--cream);
+    color: var(--green);
+  }
+
+  /* --- Sections --- */
+  .section {
+    margin-top: clamp(56px, 7vw, 96px);
+  }
+
+  .section-heading {
+    margin-bottom: 20px;
+  }
+
+  .section-heading--ruled {
+    padding-bottom: 14px;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .grid {
+    display: grid;
+    gap: clamp(18px, 2.2vw, 28px);
+  }
+
+  .grid--2 {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .grid--3 {
+    grid-template-columns: repeat(3, 1fr);
+  }
+
+  .card-title {
+    font-size: 16px;
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-top: 16px;
+  }
+
+  .card-title--sm {
+    font-size: 14px;
+    margin-top: 14px;
+  }
+
+  .card-date {
+    font-size: 10px;
+    opacity: 0.65;
+    margin-top: 7px;
+  }
+
+  /* --- Articles --- */
+  .article-list li {
+    border-top: 1px solid var(--line);
+  }
+
+  .article-list li:last-child {
+    border-bottom: 1px solid var(--line);
+  }
+
+  .article-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 20px;
+    width: 100%;
+    padding: 15px 0 14px;
+    text-align: left;
+  }
+
+  .article-title {
+    font-size: 16px;
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+  }
+
+  .article-row:hover .article-read {
+    text-decoration: underline;
+    text-underline-offset: 4px;
+  }
+
+  /* --- Responsive --- */
+  @media (max-width: 860px) {
+    .grid--3 {
+      grid-template-columns: 1fr;
+    }
+  }
+
+  @media (max-width: 640px) {
+    .grid--2 {
+      grid-template-columns: 1fr;
+    }
+  }
+</style>
