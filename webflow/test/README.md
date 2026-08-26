@@ -5,7 +5,16 @@ Node + jsdom. Not shipped to Webflow — local verification only.
 ```bash
 npm install jsdom
 node test-opener-compat.cjs  # data-video-id + legacy data-videopop-id
+node test-popuprouter.cjs    # popup <-> URL history semantics (no jsdom needed)
 ```
+
+`test-popuprouter.cjs` covers `popuprouter.js`: opening a popup pushes exactly
+one entry, a chain of articles read inside the overlay collapses to one Back
+press, Back closes / Forward re-opens, the WATCH -> READ handoff replaces rather
+than stacks, a cold `?watch=` link restores the video without duplicating an
+entry, and a cold article URL is left to render as the standalone page. It runs
+the real router against a small `window`/`history` stub rather than jsdom, since
+the behaviour under test is pure history bookkeeping.
 
 `test-opener-compat.cjs` guards the `data-video-id` rename: openers may use the
 new generic name or the legacy `data-videopop-id`, new wins when both are set,

@@ -305,6 +305,37 @@ ${old.textContent}
     return content.cloneNode(true);
   };
 
+  // --- Standalone article pages ---------------------------------------------
+  // A shared link (/full-investigation-page/<slug>) renders the article as a
+  // real page. That page reuses the popup's CSS classes for visual continuity
+  // but ships no [data-popup] component, so everything below skips it and its
+  // close button is left unbound — clicking it would do nothing at all.
+  //
+  // Point it home instead: someone who arrived from a shared link has no
+  // overlay to dismiss and no in-site history to go back to, so "close the
+  // story" can only sensibly mean "show me the site".
+  //
+  // Detected by the absence of a dialog rather than by URL, so it stays correct
+  // whatever the CMS collection is called.
+  if (!document.querySelector("[data-popup]")) {
+    document.querySelectorAll("[data-popup-close]").forEach((btn) => {
+      if (btn.dataset.popupCloseBound) return;
+      btn.dataset.popupCloseBound = "true";
+      btn.addEventListener("click", (e) => {
+        e.preventDefault();
+        // A real in-site referrer means the visitor came from a page of ours
+        // that simply did not open an overlay; going back is truer to intent
+        // than jumping to the homepage.
+        const sameOrigin =
+          document.referrer &&
+          new URL(document.referrer, window.location.href).origin ===
+            window.location.origin;
+        if (sameOrigin && window.history.length > 1) window.history.back();
+        else window.location.href = "/";
+      });
+    });
+  }
+
   document.querySelectorAll("[data-popup]").forEach((component) => {
     if (component.dataset.scriptInitialized) return;
     component.dataset.scriptInitialized = "true";
@@ -339,6 +370,9 @@ ${old.textContent}
     // Bumped on every open; a resolved fetch whose token is stale gets dropped
     // so a slow first click can't overwrite a fast second one.
     let requestToken = 0;
+    // The article URL currently reflected in the address bar, so closing knows
+    // what to retract and re-opening the same one is a no-op.
+    let currentHref = null;
 
     // Stagger targets are re-queried per open, since injected content can
     // bring its own.
@@ -392,6 +426,16 @@ ${old.textContent}
     const openPopupWithContent = async (href, title) => {
       const token = ++requestToken;
 
+      // Reflect the article in the address bar so the view is shareable. This
+      // is the real CMS page path, so a shared link resolves to a page that is
+      // already indexed and already has its own OG tags.
+      // Skipped while the router is driving us, or it would push over the very
+      // entry it is restoring.
+      if (href && href !== "#" && !window.__popupRouter?.isSuppressed()) {
+        currentHref = new URL(href, window.location.href).href;
+        window.__popupRouter?.open("article", { href: currentHref }, currentHref);
+      }
+
       if (slot) slot.innerHTML = SKELETON_HTML;
       // Title comes in with the fetched content; kept for optional headings.
       if (title) component.setAttribute("aria-label", title);
@@ -432,9 +476,12 @@ ${old.textContent}
       }
     };
 
-    const closePopup = () => {
+    // Closes without touching history — the router calls this when the Back
+    // button (or another popup taking over) already moved the URL.
+    const closePopupSilently = () => {
       if (!isOpen) return;
       isOpen = false;
+      currentHref = null;
       window.__popupScrollLock.unlock();
       // Invalidate any in-flight fetch so it can't paint into a closed popup.
       requestToken++;
@@ -455,6 +502,28 @@ ${old.textContent}
           .to(backdrop, { opacity: 0, duration: 0.35, ease: "power2.in" }, "<");
       }
     };
+
+    // The close path every user gesture goes through: retract the article URL
+    // as well as hiding the popup.
+    const closePopup = () => {
+      if (!isOpen) return;
+      const hadHref = currentHref;
+      closePopupSilently();
+      if (hadHref) window.__popupRouter?.close("article");
+    };
+
+    // Back/forward and cold-load restores are driven by the router.
+    window.__popupRouter?.register({
+      name: "article",
+      // Article URLs are real pages that render on their own, so a cold visit
+      // is left alone — see the header note in popuprouter.js.
+      restoreOnLoad: false,
+      matches: () => null,
+      open: (state) => {
+        if (state?.href) openPopupWithContent(state.href);
+      },
+      close: closePopupSilently
+    });
 
     closeButtons.forEach((btn) => btn.addEventListener("click", closePopup));
     backdrop.addEventListener("click", closePopup);

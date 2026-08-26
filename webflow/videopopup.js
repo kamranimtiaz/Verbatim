@@ -778,6 +778,8 @@
       let lastFocused = null;
       // Kept so the "Read" button can find the article link for this video.
       let activeOpener = null;
+      // The video id currently reflected in the address bar, or null.
+      let currentGuid = null;
 
       const openPopup = async (opener) => {
         if (isOpen) return;
@@ -795,6 +797,17 @@
         component.style.pointerEvents = 'auto';
 
         const guid = player.getAttribute('data-videopop-id');
+
+        // Reflect the video in the address bar. A video has no page of its own,
+        // so this is a query param on whatever page is showing rather than a
+        // path — see the header note in popuprouter.js.
+        if (guid && !window.__popupRouter?.isSuppressed()) {
+          currentGuid = guid;
+          const url = new URL(window.location.href);
+          url.searchParams.set('watch', guid);
+          window.__popupRouter?.open('video', { guid: guid }, url.href);
+        }
+
         if (guid) {
           setPosterAndPrefetch();
         } else {
@@ -823,9 +836,13 @@
         if (dialog) dialog.focus();
       };
 
-      const closePopup = () => {
+      // Closes without touching history — used by the router when Back has
+      // already moved the URL, and by the "Read" handoff, which pushes the
+      // article URL over this one rather than retracting first.
+      const closePopupSilently = () => {
         if (!isOpen) return;
         isOpen = false;
+        currentGuid = null;
         window.__popupScrollLock.unlock();
         video.pause();
 
@@ -856,6 +873,53 @@
         }
       };
 
+      // The close path every user gesture goes through: retract ?watch= as
+      // well as hiding the popup.
+      const closePopup = () => {
+        if (!isOpen) return;
+        const hadGuid = currentGuid;
+        closePopupSilently();
+        if (hadGuid) window.__popupRouter?.close('video');
+      };
+
+      // Find the opener for a given video id, so a shared ?watch= link can be
+      // restored with the same poster/title/article-link the card would supply.
+      const findOpenerForGuid = (guid) =>
+        collectOpeners().filter((o) => readOpener(o).guid === guid)[0] || null;
+
+      window.__popupRouter?.register({
+        name: 'video',
+        // A ?watch= URL has no standalone page behind it, so unlike articles
+        // it does have to be restored on a cold load.
+        restoreOnLoad: true,
+        matches: (url) => {
+          const guid = url.searchParams.get('watch');
+          return guid ? { guid: guid } : null;
+        },
+        // What the URL should fall back to once the video closes.
+        cleanUrl: (url) => url.searchParams.delete('watch'),
+        open: (state) => {
+          if (!state?.guid) return;
+          const opener = findOpenerForGuid(state.guid);
+          // No matching card (CMS list not rendered yet, or the video was
+          // removed) — open on the bare id rather than doing nothing.
+          if (opener) {
+            openPopup(opener);
+          } else {
+            // applyOpener(null) is a no-op, so seed the player directly and
+            // clear the previous video's metadata rather than inheriting it.
+            player.setAttribute('data-videopop-id', state.guid);
+            player.removeAttribute('data-videopop-src');
+            player.removeAttribute('data-videopop-title');
+            player.removeAttribute('data-videopop-poster');
+            player.removeAttribute('data-videopop-preview');
+            syncTitle();
+            openPopup(null);
+          }
+        },
+        close: closePopupSilently
+      });
+
       closeButtons.forEach((btn) => btn.addEventListener('click', closePopup));
       if (backdrop) backdrop.addEventListener('click', closePopup);
       document.addEventListener('keydown', (e) => {
@@ -875,7 +939,9 @@
           const title =
             player.getAttribute('data-videopop-title') || undefined;
 
-          closePopup();
+          // Silent: the article popup is about to write its own URL over this
+          // one. Retracting first would push the user back a step mid-handoff.
+          closePopupSilently();
 
           const contentPopup = document.querySelector('[data-popup]');
           if (contentPopup && href && contentPopup._openPopupWithContent) {
