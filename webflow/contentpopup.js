@@ -305,36 +305,11 @@ ${old.textContent}
     return content.cloneNode(true);
   };
 
-  // --- Standalone article pages ---------------------------------------------
-  // A shared link (/full-investigation-page/<slug>) renders the article as a
-  // real page. That page reuses the popup's CSS classes for visual continuity
-  // but ships no [data-popup] component, so everything below skips it and its
-  // close button is left unbound — clicking it would do nothing at all.
-  //
-  // Point it home instead: someone who arrived from a shared link has no
-  // overlay to dismiss and no in-site history to go back to, so "close the
-  // story" can only sensibly mean "show me the site".
-  //
-  // Detected by the absence of a dialog rather than by URL, so it stays correct
-  // whatever the CMS collection is called.
-  if (!document.querySelector("[data-popup]")) {
-    document.querySelectorAll("[data-popup-close]").forEach((btn) => {
-      if (btn.dataset.popupCloseBound) return;
-      btn.dataset.popupCloseBound = "true";
-      btn.addEventListener("click", (e) => {
-        e.preventDefault();
-        // A real in-site referrer means the visitor came from a page of ours
-        // that simply did not open an overlay; going back is truer to intent
-        // than jumping to the homepage.
-        const sameOrigin =
-          document.referrer &&
-          new URL(document.referrer, window.location.href).origin ===
-            window.location.origin;
-        if (sameOrigin && window.history.length > 1) window.history.back();
-        else window.location.href = "/";
-      });
-    });
-  }
+  // NOTE: pages that ARE a popup (/about, /donate, a shared article link) are
+  // identified by `data-popup-static` on the popup root — see the block inside
+  // the loop below. This used to be inferred from the absence of [data-popup]
+  // entirely, which stopped being true once those pages started shipping the
+  // popup component with their content baked into the slot.
 
   document.querySelectorAll("[data-popup]").forEach((component) => {
     if (component.dataset.scriptInitialized) return;
@@ -366,6 +341,9 @@ ${old.textContent}
     }
 
     let isOpen = false;
+    // True when this popup is the page itself, not an overlay — see the
+    // data-popup-static block below.
+    let isStatic = false;
     let lastFocused = null;
     // Bumped on every open; a resolved fetch whose token is stale gets dropped
     // so a slow first click can't overwrite a fast second one.
@@ -378,13 +356,53 @@ ${old.textContent}
     // bring its own.
     const getStaggerItems = () => component.querySelectorAll("[data-popup-stagger]");
 
+    // --- Static popups --------------------------------------------------
+    // `data-popup-static` marks a popup that IS the page rather than an
+    // overlay over one: /about, /donate, and a shared article link opened
+    // cold. Webflow ships it already open with its content in the slot, so
+    // there is nothing to hide, fetch, animate or register — the whole
+    // open/close machinery below is skipped.
+    //
+    // Its close button cannot dismiss an overlay (there is no page behind
+    // it), so it leaves instead: back if the visitor came from a page of
+    // ours, home otherwise.
+    //
+    // No scroll lock: that exists to freeze the page *behind* an overlay.
+    // Here it would pin `position: fixed` on the body with nothing left to
+    // ever unlock it, trapping any content taller than the viewport.
+    if (component.hasAttribute("data-popup-static")) {
+      closeButtons.forEach((btn) => {
+        if (btn.dataset.popupCloseBound) return;
+        btn.dataset.popupCloseBound = "true";
+        btn.addEventListener("click", (e) => {
+          e.preventDefault();
+          const sameOrigin =
+            document.referrer &&
+            new URL(document.referrer, window.location.href).origin ===
+              window.location.origin;
+          if (sameOrigin && window.history.length > 1) window.history.back();
+          else window.location.href = "/";
+        });
+      });
+
+      // Cards on a static page still open overlays over it (related
+      // articles, video cards), so openers are still bound — by the
+      // bindOpeners() call at the end of this block, which every popup
+      // reaches. Only the overlay machinery in between is skipped.
+      isStatic = true;
+    }
+
     // CSS defaults are visible (for Designer editing). On the live site,
     // reset to the hidden start state before any open animation runs.
-    component.style.visibility = "hidden";
-    component.style.pointerEvents = "none";
-    gsap.set(backdrop, { opacity: 0 });
-    gsap.set(dialog, { yPercent: 100 });
-    gsap.set(getStaggerItems(), { opacity: 0, y: "2rem" });
+    // A static popup is meant to be visible on load, so it keeps the CSS
+    // defaults and skips this entirely.
+    if (!isStatic) {
+      component.style.visibility = "hidden";
+      component.style.pointerEvents = "none";
+      gsap.set(backdrop, { opacity: 0 });
+      gsap.set(dialog, { yPercent: 100 });
+      gsap.set(getStaggerItems(), { opacity: 0, y: "2rem" });
+    }
 
     const openPopup = () => {
       if (isOpen) return;
@@ -512,24 +530,30 @@ ${old.textContent}
       if (hadHref) window.__popupRouter?.close("article");
     };
 
-    // Back/forward and cold-load restores are driven by the router.
-    window.__popupRouter?.register({
-      name: "article",
-      // Article URLs are real pages that render on their own, so a cold visit
-      // is left alone — see the header note in popuprouter.js.
-      restoreOnLoad: false,
-      matches: () => null,
-      open: (state) => {
-        if (state?.href) openPopupWithContent(state.href);
-      },
-      close: closePopupSilently
-    });
+    // A static popup has no overlay to dismiss: its close button was already
+    // bound above to leave the page, and there is no history entry of ours to
+    // retract. Registering it would also let a Back press "close" the page
+    // itself into an empty shell.
+    if (!isStatic) {
+      // Back/forward and cold-load restores are driven by the router.
+      window.__popupRouter?.register({
+        name: "article",
+        // Article URLs are real pages that render on their own, so a cold visit
+        // is left alone — see the header note in popuprouter.js.
+        restoreOnLoad: false,
+        matches: () => null,
+        open: (state) => {
+          if (state?.href) openPopupWithContent(state.href);
+        },
+        close: closePopupSilently
+      });
 
-    closeButtons.forEach((btn) => btn.addEventListener("click", closePopup));
-    backdrop.addEventListener("click", closePopup);
-    document.addEventListener("keydown", (e) => {
-      if (e.key === "Escape" && isOpen) closePopup();
-    });
+      closeButtons.forEach((btn) => btn.addEventListener("click", closePopup));
+      backdrop.addEventListener("click", closePopup);
+      document.addEventListener("keydown", (e) => {
+        if (e.key === "Escape" && isOpen) closePopup();
+      });
+    }
 
     // --- Openers -----------------------------------------------------------
     const bindOpeners = () => {

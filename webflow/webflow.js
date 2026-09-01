@@ -33,7 +33,17 @@
       // touch-action stops iOS rubber-banding the locked page.
       'html.hero-intro-lock body { touch-action: none; }' +
       'html.hero-intro-armed ' + HERO_SEL.split(', ').join(', html.hero-intro-armed ') +
-      ' { opacity: 0; }';
+      ' { opacity: 0; }' +
+      // Static popup pages (/about, /donate, a shared article link) have no
+      // hero; the popup itself is the page content, and it plays the same
+      // beat the hero would. Park it out of sight before the first paint,
+      // same reasoning as above.
+      'html.hero-intro-armed [data-popup-static] .popup_backdrop { opacity: 0; }' +
+      // Opacity only, deliberately no transform: the browser resolves a
+      // percentage translate to a pixel matrix, which GSAP then reads back as
+      // `y` rather than `yPercent`, and the tween below fights it. The offset
+      // is GSAP's to own — this rule only has to stop the flash before it.
+      'html.hero-intro-armed [data-popup-static] .popup_dialog { opacity: 0; }';
     (document.head || document.documentElement).appendChild(style);
 
     document.documentElement.classList.add('hero-intro-lock', 'hero-intro-armed');
@@ -56,7 +66,7 @@ Object.assign(canvas.style, {
   width: '100%',
   height: '100%',
   pointerEvents: 'none',
-  zIndex: '1000',
+  zIndex: '2000',
 });
 document.body.appendChild(canvas);
 const ctx = canvas.getContext('2d');
@@ -262,6 +272,11 @@ addEventListener('resize', resize);
           duration: BRAND.duration,
           ease: BRAND.ease,
           scale: true,
+          // The nav sits above everything while the brand flies over the page.
+          // Once it has landed in the bar, drop it back under the popups.
+          onComplete: function () {
+            if (navWrap) navWrap.style.zIndex = '1000';
+          },
         });
       }, null, 0);
 
@@ -324,7 +339,11 @@ addEventListener('resize', resize);
     };
 
     // Scope to the hero section; the featured sections reuse these classes.
-    var heroRoot = document.querySelector('.hero_wrap') || document;
+    // Kept as its own variable: `heroRoot` falls back to `document` when there
+    // is no hero, so a page without one can still match .hero_title etc. in
+    // unrelated content. Only this tells you a hero is genuinely present.
+    var heroWrap = document.querySelector('.hero_wrap');
+    var heroRoot = heroWrap || document;
     var heroTitle = heroRoot.querySelector('.hero_title');
     var heroSub = heroRoot.querySelector('.hero_subheading');
     var heroSplits = [];
@@ -360,10 +379,12 @@ addEventListener('resize', resize);
       return split.lines;
     }
 
-    // Bail out entirely if the hero is not on this page.
+    // Bail out entirely if the hero is not on this page. Both conditions
+    // matter: no .hero_wrap means the .hero_* lookups above fell back to a
+    // document-wide search and any match is incidental, not a real hero.
     var heroAll = [heroTitle, heroSub, heroMedia, heroMeta].filter(Boolean).concat(heroPills);
 
-    if (heroAll.length) {
+    if (heroWrap && heroAll.length) {
       // Headings stay hidden by the armed class until the split runs, so the
       // un-split text never shows. Everything else can be set up now.
       gsap.set([heroMedia, heroMeta].filter(Boolean), { opacity: 0 });
@@ -457,6 +478,68 @@ addEventListener('resize', resize);
           ease: HERO.ease,
         }, '<' + HERO.pillLag);
       }
+    }
+
+    //// STATIC POPUP INTRO //////
+    // Pages that ARE a popup (/about, /donate, a shared article link) carry
+    // `data-popup-static` on the popup root. They have no hero, so the popup
+    // takes the hero's slot on the master timeline and reveals on the same
+    // beat: backdrop first, then the dialog rising into it.
+    //
+    // contentpopup.js deliberately leaves these alone — a static popup ships
+    // already open, so it has no open animation of its own to conflict with.
+    // The pre-paint rule at the top of this file parks both elements; the
+    // tweens below are what actually put them back, so every bail-out path
+    // must clear `hero-intro-armed` or the page stays blank.
+    var STATIC_POP = {
+      backdropFade: 0.5,
+      dialogRise: 0.9,
+      dialogLag: 0.25,   // dialog starts while the backdrop is still fading up
+      startAt: '-=0.42', // same overlap with the nav links as HERO.titleAt
+    };
+
+    var staticPopup = document.querySelector('[data-popup-static]');
+    var staticBackdrop = staticPopup && staticPopup.querySelector('.popup_backdrop');
+    var staticDialog = staticPopup && staticPopup.querySelector('.popup_dialog');
+
+    // Only when there is no hero: a page with both would be a layout we do not
+    // ship, and racing two reveals for the same slot looks broken. Tested on
+    // .hero_wrap, not heroAll — see the heroRoot note above; a static popup
+    // page can match stray .hero_* classes inside its own content.
+    if (!heroWrap && staticPopup && (staticBackdrop || staticDialog)) {
+      // The armed class hides these via CSS. GSAP has to own the values before
+      // it comes off, or they flash at full opacity for a frame in between.
+      if (staticBackdrop) gsap.set(staticBackdrop, { opacity: 0 });
+      // y: 0 alongside yPercent so GSAP owns both channels. Webflow may ship
+      // its own transform on this element, and a pixel offset left in `y`
+      // would survive a yPercent-only tween and strand the dialog off-screen.
+      if (staticDialog) gsap.set(staticDialog, { opacity: 0, y: 0, yPercent: 100 });
+
+      var popTl = gsap.timeline();
+
+      popTl.call(function () {
+        document.documentElement.classList.remove('hero-intro-armed');
+      }, null, 0);
+
+      if (staticBackdrop) {
+        popTl.to(staticBackdrop, {
+          opacity: 1,
+          duration: STATIC_POP.backdropFade,
+          ease: HERO.ease,
+        }, 0);
+      }
+
+      if (staticDialog) {
+        popTl.to(staticDialog, {
+          opacity: 1,
+          y: 0,
+          yPercent: 0,
+          duration: STATIC_POP.dialogRise,
+          ease: HERO.ease,
+        }, staticBackdrop ? STATIC_POP.dialogLag : 0);
+      }
+
+      master.add(popTl, STATIC_POP.startAt);
     }
 
     // Scroll comes back only once the whole intro has played out.
