@@ -6,6 +6,7 @@ Node + jsdom. Not shipped to Webflow — local verification only.
 npm install jsdom
 node test-opener-compat.cjs  # data-video-id + legacy data-videopop-id
 node test-popuprouter.cjs    # popup <-> URL history semantics (no jsdom needed)
+node test-youtube.cjs        # Bunny vs YouTube source switching
 ```
 
 `test-popuprouter.cjs` covers `popuprouter.js`: opening a popup pushes exactly
@@ -15,6 +16,15 @@ than stacks, a cold `?watch=` link restores the video without duplicating an
 entry, and a cold article URL is left to render as the standalone page. It runs
 the real router against a small `window`/`history` stub rather than jsdom, since
 the behaviour under test is pure history bookkeeping.
+
+`test-youtube.cjs` covers the `data-video-youtube` source switch in
+`videopopup.js`: id extraction from every URL shape an editor might paste
+(watch, youtu.be, shorts, embed, live, bare id) and the two that must NOT match
+— a Bunny UUID and a non-YouTube URL; the iframe mount/teardown lifecycle,
+including that closing drops the frame's `src` (a mounted frame keeps playing
+audio behind a hidden dialog); that the `<video>` and the iframe are never both
+live; `?watch=<guid>` vs `?watch=yt:<id>` round-tripping; and cold loads of a
+shared `yt:` link both with and without a matching card on the page.
 
 `test-opener-compat.cjs` guards the `data-video-id` rename: openers may use the
 new generic name or the legacy `data-videopop-id`, new wins when both are set,

@@ -24,7 +24,8 @@
     // Scoped to .hero_wrap: the featured sections reuse .hero_title and
     // .hero_subheading, and those reveal on scroll, not on load.
     var HERO_SEL = '.hero_wrap .hero_title, .hero_wrap .hero_subheading, ' +
-      '.hero_wrap .hero_media_wrap, .hero_wrap .hero_media_meta, .hero_wrap .hero_pill_wrap';
+      '.hero_wrap .hero_media_wrap, .hero_wrap .hero_media_meta, ' +
+      '.hero_wrap .hero_pill_wrap, .hero_wrap .hero_link_wrap';
 
     var style = document.createElement('style');
     style.setAttribute('data-hero-intro', '');
@@ -336,6 +337,9 @@ addEventListener('resize', resize);
       pillLag: 0.12,
       pillFade: 0.6,
       pillStagger: 0.108,
+      linkLag: 0.06,     // social icons trail the last pill
+      linkFade: 0.6,
+      linkStagger: 0.09,
     };
 
     // Scope to the hero section; the featured sections reuse these classes.
@@ -351,6 +355,7 @@ addEventListener('resize', resize);
     var heroMedia = heroRoot.querySelector('.hero_media_wrap');
     var heroMeta = heroRoot.querySelector('.hero_media_meta');
     var heroPills = gsap.utils.toArray(heroRoot.querySelectorAll('.hero_pill_wrap'));
+    var heroLinks = gsap.utils.toArray(heroRoot.querySelectorAll('.hero_link_wrap'));
 
     // Split into lines wrapped in overflow:hidden masks, so each line can be
     // driven up from below its own clip edge instead of just fading.
@@ -382,13 +387,15 @@ addEventListener('resize', resize);
     // Bail out entirely if the hero is not on this page. Both conditions
     // matter: no .hero_wrap means the .hero_* lookups above fell back to a
     // document-wide search and any match is incidental, not a real hero.
-    var heroAll = [heroTitle, heroSub, heroMedia, heroMeta].filter(Boolean).concat(heroPills);
+    var heroAll = [heroTitle, heroSub, heroMedia, heroMeta].filter(Boolean)
+        .concat(heroPills, heroLinks);
 
     if (heroWrap && heroAll.length) {
       // Headings stay hidden by the armed class until the split runs, so the
       // un-split text never shows. Everything else can be set up now.
       gsap.set([heroMedia, heroMeta].filter(Boolean), { opacity: 0 });
       if (heroPills.length) gsap.set(heroPills, { opacity: 0, y: HERO.rise });
+      if (heroLinks.length) gsap.set(heroLinks, { opacity: 0, y: HERO.rise });
 
       // The hero sits ~3s into the master timeline. Splitting now would measure
       // against whatever face is loaded at DOMContentLoaded and bake in line
@@ -477,6 +484,20 @@ addEventListener('resize', resize);
           stagger: HERO.pillStagger,
           ease: HERO.ease,
         }, '<' + HERO.pillLag);
+      }
+
+      // Social icons share the pills' row, so they read as one run: they pick
+      // up where the pill stagger left off rather than starting their own
+      // beat. '<' when there are no pills so they still ride the media tween.
+      if (heroLinks.length) {
+        master.to(heroLinks, {
+          opacity: 1,
+          y: 0,
+          duration: HERO.linkFade,
+          stagger: HERO.linkStagger,
+          ease: HERO.ease,
+        }, heroPills.length ? '<' + (heroPills.length * HERO.pillStagger + HERO.linkLag)
+                            : '<' + HERO.pillLag);
       }
     }
 

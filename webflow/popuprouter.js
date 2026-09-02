@@ -39,9 +39,15 @@
 
   var MARKER = 'verbitamPopup';
 
-  // The URL to restore when every popup is closed. Captured once at load, so
-  // it is the page the visitor actually arrived on, not whatever a popup
-  // rewrote it to since.
+  // The URL to restore when every popup is closed. Captured at load, so it is
+  // the page the visitor actually arrived on, not whatever a popup rewrote it
+  // to since.
+  //
+  // It must never keep a popup's own param. A visitor landing on a shared
+  // ?watch= link captures a DIRTY base here — this script evaluates before any
+  // kind has registered, so there is nothing yet that knows `watch` is a popup
+  // param. register() re-cleans it as soon as a kind can say so; without that,
+  // every close after the first "restores" the URL back to the landing param.
   var baseUrl = window.location.href;
 
   // Registered popup kinds, in priority order of who gets asked to close first.
@@ -51,6 +57,12 @@
   // The popup state currently reflected in the address bar, or null.
   // { kind, state, url }
   var current = null;
+
+  // True when `current` is the entry the visitor LANDED on (a shared ?watch=
+  // link opened cold), rather than one we pushed. There is nothing behind it
+  // to go back to, so closing must rewrite in place instead of calling back()
+  // — see the note in close().
+  var currentIsLanding = false;
 
   // Set while the router itself is driving a popup open/close, so the handlers
   // it calls can skip re-entering the router and pushing a second entry.
@@ -81,6 +93,20 @@
    */
   function register(kind) {
     kinds.push(kind);
+
+    // Strip this kind's param from the base captured at script-eval, when no
+    // kind had yet registered to identify it. Safe to repeat: cleanUrl only
+    // removes what its own popup owns, and is a no-op once already gone.
+    if (kind.cleanUrl) {
+      try {
+        var clean = new URL(baseUrl);
+        kind.cleanUrl(clean);
+        baseUrl = clean.href;
+      } catch (e) {
+        console.warn('[popuprouter] cleanUrl failed for ' + kind.name + ':', e);
+      }
+    }
+
   }
 
   /**
@@ -101,13 +127,24 @@
     // Replace when we are already showing a popup: the chain of articles a
     // reader clicks through inside the overlay should collapse to one Back
     // press, not one per article.
-    if (replace || current) {
+    //
+    // `current` alone is not enough to prove that. If a popup ever closes
+    // without telling us, `current` goes stale, and replacing on a stale value
+    // overwrites the last CLEAN entry — leaving nothing to go back to and
+    // making the param impossible to shed. Corroborate against history.state:
+    // a real chain has our marker on the current entry. Anything else falls
+    // through to pushState, which is always recoverable.
+    var st = window.history.state;
+    var chaining = !!(current && st && st[MARKER] && st[MARKER].url === current.url);
+
+    if (replace || chaining) {
       window.history.replaceState(payload, '', resolved);
     } else {
       window.history.pushState(payload, '', resolved);
     }
 
     current = entry;
+    currentIsLanding = false;
   }
 
   /**
@@ -122,13 +159,34 @@
     if (!current || (name && current.kind !== name)) return;
 
     var entry = current;
+    var wasLanding = currentIsLanding;
     current = null;
+    currentIsLanding = false;
 
     var st = window.history.state;
-    if (st && st[MARKER] && st[MARKER].url === entry.url) {
+    // A landing entry has nothing behind it: back() would either be ignored
+    // (leaving ?watch= in the address bar) or walk the visitor off the site.
+    // Rewrite it in place instead — Back then leaves, which is correct for a
+    // link opened cold.
+    if (wasLanding) {
+      window.history.replaceState(null, '', baseUrl);
+    } else if (st && st[MARKER] && st[MARKER].url === entry.url) {
       // popstate fires next tick; the handler sees current === null and so
       // does not try to close anything a second time.
       window.history.back();
+
+      // back() is a request, not a guarantee: the entry behind may not be the
+      // clean page (a mis-tracked open can overwrite it), and Chrome's
+      // history-manipulation intervention can decline the call outright. Both
+      // strand the visitor on a popup URL. Verify on the next turn and rewrite
+      // in place if we are still dirty — `current` is null by then, so this
+      // cannot fight a popup that has legitimately reopened since.
+      var expected = entry.url;
+      window.setTimeout(function () {
+        if (current) return;
+        if (window.location.href !== expected) return;
+        window.history.replaceState(null, '', baseUrl);
+      }, 0);
     } else {
       window.history.replaceState(null, '', baseUrl);
     }
@@ -156,6 +214,7 @@
       if (current && current.url === entry.url) return;
       closeAllSuppressed();
       current = entry;
+      currentIsLanding = false;
       var kind = kinds.filter(function (k) { return k.name === entry.kind; })[0];
       if (kind) {
         runSuppressed(function () {
@@ -170,6 +229,7 @@
     // router must not interfere.
     if (current) {
       current = null;
+      currentIsLanding = false;
       closeAllSuppressed();
     }
   });
@@ -203,6 +263,7 @@
       payload[MARKER] = { kind: kind.name, state: state, url: window.location.href };
       window.history.replaceState(payload, '', window.location.href);
       current = payload[MARKER];
+      currentIsLanding = true;
 
       // baseUrl must not keep the popup param, or closing would restore a URL
       // that immediately looks "open" again.
@@ -230,12 +291,45 @@
     close: close,
     isSuppressed: isSuppressed,
     restoreFromUrl: restoreFromUrl,
+    scrubUnclaimedParams: scrubUnclaimedParams,
     getBaseUrl: function () { return baseUrl; }
   };
+
+  /**
+   * Drop popup params that no kind claimed from the CURRENT history entry.
+   *
+   * A visitor can land on a ?watch= link that nothing restores — the id matched
+   * no card, or the kind does not restore on load. The param then sits in the
+   * landing history entry, and close()'s back() would later drop the visitor
+   * right back onto it: the popup closes, the URL reverts, and it looks like
+   * cleanup silently stopped working after the first close.
+   *
+   * Only runs when no popup is open, so a live ?watch= is never disturbed.
+   */
+  function scrubUnclaimedParams() {
+    if (current) return;
+    var url = new URL(window.location.href);
+    var before = url.href;
+    kinds.forEach(function (kind) {
+      if (!kind.cleanUrl) return;
+      try {
+        kind.cleanUrl(url);
+      } catch (e) {
+        console.warn('[popuprouter] cleanUrl failed for ' + kind.name + ':', e);
+      }
+    });
+    if (url.href !== before) {
+      window.history.replaceState(window.history.state, '', url.href);
+    }
+    baseUrl = url.href;
+  }
 
   // Run after the popup scripts have had a chance to register. They init on
   // DOMContentLoaded, so restoring on `load` guarantees registration first.
   window.addEventListener('load', function () {
+    // Only scrub what the restore did NOT claim: if it opened a popup, the
+    // param is live and `current` is set, so the scrub is a no-op.
     restoreFromUrl();
+    scrubUnclaimedParams();
   });
 })();

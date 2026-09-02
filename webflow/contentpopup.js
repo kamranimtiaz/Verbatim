@@ -444,13 +444,22 @@ ${old.textContent}
     const openPopupWithContent = async (href, title) => {
       const token = ++requestToken;
 
+      // What the popup is SHOWING, tracked however it was opened. The router
+      // drives Back/Forward restores inside runSuppressed(), so isSuppressed()
+      // is true on that path — gating this on it (as the history write below
+      // rightly is) would leave currentHref null for a router-opened article,
+      // and closePopup's `if (hadHref)` would then skip router.close(),
+      // stranding the article path in the address bar.
+      if (href && href !== "#") {
+        currentHref = new URL(href, window.location.href).href;
+      }
+
       // Reflect the article in the address bar so the view is shareable. This
       // is the real CMS page path, so a shared link resolves to a page that is
       // already indexed and already has its own OG tags.
       // Skipped while the router is driving us, or it would push over the very
       // entry it is restoring.
-      if (href && href !== "#" && !window.__popupRouter?.isSuppressed()) {
-        currentHref = new URL(href, window.location.href).href;
+      if (currentHref && !window.__popupRouter?.isSuppressed()) {
         window.__popupRouter?.open("article", { href: currentHref }, currentHref);
       }
 

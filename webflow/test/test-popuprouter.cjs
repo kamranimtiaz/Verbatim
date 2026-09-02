@@ -48,6 +48,9 @@ function makeEnv(startUrl = BASE) {
       }
     },
     addEventListener(type, fn) { (listeners[type] ||= []).push(fn); },
+    // close() schedules a verification pass on the next turn; the router
+    // reaches for it as window.setTimeout.
+    setTimeout,
     URL,
     console
   };
@@ -216,6 +219,78 @@ async function test(name, fn) {
     assert.deepStrictEqual(video.opened, [{ guid: 'g9' }]);
     assert.strictEqual(env.depth(), 1, 'a cold load must not push a duplicate entry');
     assert.strictEqual(r.getBaseUrl(), BASE, 'base URL must drop ?watch=');
+  });
+
+  await test('closing a COLD-LOADED ?watch= link strips the param', async () => {
+    // Regression: restoreFromUrl marks the LANDING entry as the popup, so
+    // there is nothing behind it. close() used to call history.back(), which
+    // at index 0 is ignored — the popup hid but ?watch= stayed in the address
+    // bar, and reloading re-opened it. Landing entries must rewrite in place.
+    const env = makeEnv(BASE + '?watch=yt%3AVYg5EpGZFWg');
+    const r = loadRouter(env);
+    const kind = fakeKind('video', {
+      restoreOnLoad: true,
+      matches: (u) => (u.searchParams.get('watch') ? { guid: u.searchParams.get('watch') } : null),
+      cleanUrl: (u) => u.searchParams.delete('watch')
+    });
+    r.register(kind);
+    r.restoreFromUrl();
+    assert.strictEqual(kind.opened.length, 1, 'cold link should restore the popup');
+    r.close('video');
+    await tick();
+    assert.strictEqual(env.url(), BASE, '?watch= must be gone after close');
+    assert.strictEqual(env.depth(), 1, 'must not strand the visitor off-site');
+  });
+
+  await test('every close after a cold ?watch= landing stays clean', async () => {
+    // Regression: baseUrl is captured at script-eval, before any kind has
+    // registered to say `watch` is a popup param — so landing on a shared link
+    // captured a DIRTY base, and the landing history entry kept the param too.
+    // The first close worked (landing branch), but every close after it either
+    // restored the stale baseUrl or had back() drop the visitor onto the dirty
+    // landing entry. Symptom: the same old ?watch= id reappears on close #2+.
+    const dirty = BASE + '?watch=yt%3AVYg5EpGZFWg';
+    const env = makeEnv(dirty);
+    const r = loadRouter(env);
+    // A kind that does NOT restore, so nothing claims the landing param.
+    r.register(fakeKind('video', { cleanUrl: (u) => u.searchParams.delete('watch') }));
+    // What the load listener does, in order.
+    r.restoreFromUrl();
+    r.scrubUnclaimedParams();
+    assert.strictEqual(env.url(), BASE, 'unclaimed landing param must be scrubbed');
+
+    for (let n = 2; n <= 4; n++) {
+      r.open('video', { guid: 'yt:V' + n }, BASE + '?watch=yt%3AV' + n);
+      r.close('video');
+      await tick();
+      assert.strictEqual(env.url(), BASE, `close #${n} must strip ?watch=`);
+    }
+  });
+
+  await test('a stale `current` does not replace the last clean entry', async () => {
+    // Hardening: if a popup ever closes without telling the router, `current`
+    // goes stale. open() used to treat that as "chaining" and replaceState
+    // over the clean entry, leaving nothing to go back to — one missed call
+    // turned into a permanently stuck param. history.state must corroborate.
+    const env = makeEnv();
+    const r = loadRouter(env);
+    r.register(fakeKind('video', { cleanUrl: (u) => u.searchParams.delete('watch') }));
+
+    r.open('video', { guid: 'A' }, BASE + '?watch=A');
+    const lenAfterFirst = env.length();
+    // Simulate the popup hiding itself without calling router.close():
+    // history.state still carries A's marker, but the user navigated onward.
+    env.win.history.replaceState(null, '', BASE);
+
+    r.open('video', { guid: 'B' }, BASE + '?watch=B');
+    assert.ok(
+      env.length() > lenAfterFirst,
+      'stale `current` must fall through to pushState, not replace the clean entry'
+    );
+
+    r.close('video');
+    await tick();
+    assert.strictEqual(env.url(), BASE, 'close must still land clean');
   });
 
   await test('cold article URL is NOT hijacked into a popup', () => {

@@ -1,0 +1,96 @@
+/* ---------------------------------------------------------------------------
+ * youtube-mode.css — paste into a Webflow Embed inside the videopop component
+ * (or into Site Settings → Custom Code → Head).
+ *
+ * videopopup.js writes ONE attribute on [data-videopop-player]:
+ *
+ *     data-videopop-source="bunny"    <- custom <video> + your chrome
+ *     data-videopop-source="youtube"  <- <iframe>, YouTube's own chrome
+ *
+ * Everything about which controls show is decided here, in CSS. The JS never
+ * hides an element by class, so you can restyle or rename freely — add a
+ * selector to the list below and it follows the mode automatically.
+ *
+ * The YouTube embed opens PAUSED (autoplay=0 in videopopup.js), so the viewer
+ * presses play just as they would on a Bunny video.
+ * ------------------------------------------------------------------------- */
+
+/* The Bunny-only chrome. YouTube draws its own play/seek/volume/fullscreen,
+   so ours would sit dead on top of the iframe. */
+[data-videopop-source="youtube"] .videopop_interface,
+[data-videopop-source="youtube"] .videopop_bigbtn_wrap,
+[data-videopop-source="youtube"] .videopop_loading,
+[data-videopop-source="youtube"] .videopop_fade {
+  display: none !important;
+}
+
+/* The <video> and the <iframe> occupy the same box — only one is ever live. */
+[data-videopop-source="youtube"] .videopop_video {
+  display: none !important;
+}
+[data-videopop-source="bunny"] [data-videopop-youtube-frame] {
+  display: none !important;
+}
+
+/* The iframe is absolutely positioned, so the player needs to be its
+   containing block. Harmless if your CSS already sets this. */
+.videopop_player {
+  position: relative;
+}
+
+/* ---------------------------------------------------------------------------
+ * CLOSE BUTTON vs YOUTUBE'S OWN TOP-RIGHT OVERLAY
+ *
+ * YouTube paints share / watch-later / "more" in the top-right of the iframe,
+ * exactly where our close button sits, and no embed parameter removes them.
+ * Since they live inside a cross-origin iframe we cannot restyle them — but we
+ * CAN sit on top: .videopop_close_wrap is a sibling of .videopop_player, so
+ * raising it above the frame is enough to take back the clicks.
+ * ------------------------------------------------------------------------- */
+/* NOTE: no `position` here on purpose — your close button is already
+   positioned in the corner by Webflow, and restating it would move it.
+   z-index alone is enough for an already-positioned element. */
+.videopop_close_wrap {
+  z-index: 10;
+}
+
+[data-videopop-source="youtube"] [data-videopop-youtube-frame] {
+  z-index: 1;
+}
+
+/* Their overlay only appears in the top-right corner, so a small opaque pad
+   behind the X keeps it readable over a bright frame. Delete if your close
+   button already has its own background. */
+.videopop_close_wrap::before {
+  content: "";
+  position: absolute;
+  inset: -0.5rem;
+  background: rgba(0, 0, 0, 0.55);
+  border-radius: 50%;
+  z-index: -1;
+}
+
+/* ---------------------------------------------------------------------------
+ * KEEPING THE TITLE + READ BUTTON IN YOUTUBE MODE
+ *
+ * .videopop_meta (title + Read) currently lives INSIDE .videopop_interface,
+ * so the rule above hides it in both modes. Two ways to keep it — pick one:
+ *
+ * A. STRUCTURAL (preferred): in Webflow, drag .videopop_meta out of
+ *    .videopop_interface so it is a direct child of .videopop_player.
+ *    Then delete the block below — nothing else changes.
+ *
+ * B. CSS-ONLY: keep the markup as-is and un-hide the meta row. Uncomment:
+ * ------------------------------------------------------------------------- */
+/*
+[data-videopop-source="youtube"] .videopop_interface {
+  display: flex !important;
+}
+[data-videopop-source="youtube"] .videopop_timeline_wrap,
+[data-videopop-source="youtube"] .videopop_controls {
+  display: none !important;
+}
+[data-videopop-source="youtube"] .videopop_meta {
+  display: flex !important;
+}
+*/

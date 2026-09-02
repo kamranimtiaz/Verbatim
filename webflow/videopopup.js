@@ -18,6 +18,24 @@
  * `data-video-title` — the same fields the inline player uses. One CMS binding
  * feeds both modes.
  *
+ * SOURCE CONTRACT (Bunny vs YouTube — one attribute, no second code path)
+ *
+ *   data-video-youtube="<any YouTube URL or bare id>"  on the card or opener
+ *
+ * Present  -> YOUTUBE mode: an <iframe> is mounted and YouTube draws its own
+ *             controls. No IFrame API is loaded, so there is no second
+ *             play/seek/volume system to keep in sync.
+ * Absent   -> BUNNY mode: the <video> element plus all the chrome below.
+ *
+ * The mode is published as `data-videopop-source="bunny"|"youtube"` on
+ * [data-videopop-player]. WHICH ELEMENTS HIDE IS DECIDED IN CSS, NOT HERE —
+ * see youtube-mode.css. To hide one more thing in YouTube mode, add a
+ * selector there; this file does not need to change.
+ *
+ * Shared links: ?watch=<guid> for Bunny, ?watch=yt:<id> for YouTube. One
+ * param, one router kind — the 11-char YouTube charset cannot collide with a
+ * Bunny UUID.
+ *
  * ICONS — found by attribute, styled by class:
  *   data-videopop-icon="play" | "pause" | "volume-up" | "volume-mute"
  *                     | "maximise" | "minimise"
@@ -86,6 +104,39 @@
     minimise: '[data-videopop-icon="minimise"]'
   };
 
+  // --- YouTube ---------------------------------------------------------------
+  // A card is a YouTube card when `data-video-youtube` holds anything we can
+  // pull an id out of. That one attribute is the whole mode switch, mirroring
+  // how `data-videoinline-player` alone decides inline vs popup.
+  //
+  // YouTube keeps its OWN controls (see `data-videopop-source` below), so there
+  // is no IFrame API to load and no second set of play/seek/volume plumbing to
+  // keep in sync with the <video> element.
+
+  // Every shape an editor might paste, plus a bare id. The id is always the
+  // 11-char [A-Za-z0-9_-] token; anything after it (&t=, ?si=, /) is dropped.
+  const YT_ID = /(?:youtu\.be\/|\/shorts\/|\/embed\/|\/live\/|[?&]v=)([A-Za-z0-9_-]{11})|^([A-Za-z0-9_-]{11})$/;
+
+  const youtubeId = (raw) => {
+    if (!raw) return null;
+    const m = String(raw).trim().match(YT_ID);
+    return m ? m[1] || m[2] : null;
+  };
+
+  // The popup opens PAUSED — the viewer presses play, same as a Bunny video,
+  // and nothing starts making noise on its own.
+  //
+  //   rel=0            end-cards stay on the same channel
+  //   playsinline=1    stops iOS yanking the video out of the dialog into its
+  //                    own native fullscreen
+  //   modestbranding=1 drops the YouTube wordmark from the control bar
+  //
+  // YouTube's own top-right overlay (share / watch-later / more) sits exactly
+  // where our close button does. There is no embed parameter that removes it,
+  // so the fix is z-index in CSS — see youtube-mode.css.
+  const youtubeEmbed = (id, { autoplay = false } = {}) =>
+    `https://www.youtube-nocookie.com/embed/${id}?rel=0&modestbranding=1&playsinline=1&autoplay=${autoplay ? 1 : 0}`;
+
   // Bunny only ever supplies what the CMS did not. With no GUID every field is
   // null, so a card that carries CMS art but no video still renders its poster.
   const cdnSources = (guid) => {
@@ -137,6 +188,13 @@
     return {
       card,
       guid: opener.dataset.videoId || opener.dataset.videopopId || fromCard('data-video-id') || '',
+      // Any YouTube URL shape, or a bare id. Non-null => YouTube mode.
+      youtube: youtubeId(
+        opener.dataset.videoYoutube ||
+          opener.dataset.videopopYoutube ||
+          fromCard('data-video-youtube') ||
+          ''
+      ),
       src:
         opener.dataset.videopopSrc ||
         fromCard('data-videopop-src') ||
@@ -168,6 +226,7 @@
     if (!HYDRATE_CARDS || card.dataset.videopopCardHydrated) return;
 
     const guid = card.getAttribute('data-video-id');
+    const ytId = youtubeId(card.getAttribute('data-video-youtube'));
     // CMS art wins outright; Bunny is only the fallback when the field is empty.
     // Resolved per-card rather than per-GUID so a card with a CMS thumbnail and
     // no GUID still hydrates — and never touches the CDN.
@@ -175,12 +234,17 @@
     const posterImg = card.querySelector('[data-videoinline-poster-img]');
     const previewImg = card.querySelector('[data-videoinline-preview]');
 
+    // YouTube has no preview clip and only one still, so it fills the poster
+    // slot only. hqdefault exists for every video; maxres does not.
+    const ytPoster = ytId ? `https://i.ytimg.com/vi/${ytId}/hqdefault.jpg` : null;
+
     // Precedence: explicit -src attribute, then art the CMS already bound into
-    // the img, then Bunny's auto-derived file. Bunny never overwrites CMS art.
+    // the img, then the auto-derived file. Neither CDN overwrites CMS art.
     const poster =
       card.getAttribute('data-videoinline-poster-src') ||
-      cmsArt(posterImg, sources.poster) ||
-      sources.poster;
+      cmsArt(posterImg, sources.poster || ytPoster) ||
+      sources.poster ||
+      ytPoster;
     const previewSrc =
       card.getAttribute('data-videoinline-preview-src') ||
       cmsArt(previewImg, sources.preview) ||
@@ -188,7 +252,7 @@
 
     // Nothing to show and nothing to warm — leave the card untouched so a later
     // pass (CMS binding, popup rehydrate) can still hydrate it.
-    if (!guid && !poster && !previewSrc) return;
+    if (!guid && !ytId && !poster && !previewSrc) return;
     card.dataset.videopopCardHydrated = 'true';
 
     if (posterImg && poster && posterImg.getAttribute('src') !== poster) {
@@ -238,9 +302,14 @@
     };
 
     document.querySelectorAll(POPUP_CARD).forEach((card) => {
-      if (!card.getAttribute('data-video-id') && !card.getAttribute('data-videopop-src')) {
+      if (
+        !card.getAttribute('data-video-id') &&
+        !card.getAttribute('data-videopop-src') &&
+        !youtubeId(card.getAttribute('data-video-youtube'))
+      ) {
         console.warn(
-          '[videopopup] popup-mode card has no data-video-id, so it cannot open anything.',
+          '[videopopup] popup-mode card has no data-video-id or data-video-youtube, ' +
+            'so it cannot open anything.',
           card
         );
         return;
@@ -497,6 +566,58 @@
         }
       };
 
+      // --- YouTube mode ----------------------------------------------------
+      // The popup shows exactly one of two players. Bunny gets the <video> and
+      // all the custom chrome; YouTube gets an <iframe> and its own controls.
+      //
+      // Which chrome is visible is decided in CSS off `data-videopop-source` on
+      // the player (see the embed in Part 1E / components.html), NOT here — so
+      // restyling or hiding another element never means touching this file:
+      //
+      //   [data-videopop-source="youtube"] .videopop_interface,
+      //   [data-videopop-source="youtube"] .videopop_bigbtn_wrap,
+      //   [data-videopop-source="youtube"] .videopop_loading,
+      //   [data-videopop-source="youtube"] .videopop_fade { display: none; }
+      //
+      // The title/Read row is ours in both modes, so if it lives inside
+      // .videopop_interface, lift it out rather than adding a JS exception.
+      let ytFrame = null;
+
+      const setSource = (mode) => player.setAttribute('data-videopop-source', mode);
+
+      // Built on first use and reused after — same lifecycle as the <video>,
+      // so the two players never both hold a source.
+      const mountYoutube = (id) => {
+        if (!ytFrame) {
+          ytFrame = document.createElement('iframe');
+          // Distinct from the player's `data-videopop-youtube`, which holds the
+          // id and is the mode flag — this only marks the frame element.
+          ytFrame.setAttribute('data-videopop-youtube-frame', '');
+          ytFrame.setAttribute('title', 'YouTube video player');
+          ytFrame.setAttribute('frameborder', '0');
+          ytFrame.setAttribute('allowfullscreen', '');
+          ytFrame.setAttribute(
+            'allow',
+            'accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share'
+          );
+          // Matches the <video>'s box so the CSS that sizes .videopop_video
+          // does not have to be duplicated for the frame.
+          ytFrame.style.cssText =
+            'position:absolute;inset:0;width:100%;height:100%;border:0;background:#000;';
+          video.parentNode.insertBefore(ytFrame, video.nextSibling);
+        }
+        ytFrame.src = youtubeEmbed(id);
+        ytFrame.style.display = '';
+      };
+
+      // Dropping the src is what actually stops playback — an iframe left
+      // mounted keeps playing audio behind a closed dialog.
+      const unmountYoutube = () => {
+        if (!ytFrame) return;
+        ytFrame.removeAttribute('src');
+        ytFrame.style.display = 'none';
+      };
+
       const resetToStart = () => {
         if (!video.src) return; // no source loaded yet (HLS deferred), nothing to reset
         const seek = () => {
@@ -522,6 +643,12 @@
         if (!opener) return;
         const data = readOpener(opener);
 
+        // YouTube wins when both are present — an explicit YouTube link is a
+        // deliberate override of whatever GUID the card was carrying.
+        if (data.youtube) player.setAttribute('data-videopop-youtube', data.youtube);
+        else player.removeAttribute('data-videopop-youtube');
+        setSource(data.youtube ? 'youtube' : 'bunny');
+
         if (data.guid) player.setAttribute('data-videopop-id', data.guid);
         else player.removeAttribute('data-videopop-id');
 
@@ -542,6 +669,9 @@
 
       syncTitle();
       setState('paused');
+      // Default until an opener says otherwise, so the CSS always has a value
+      // to match and the Bunny chrome is visible on first paint.
+      setSource(player.getAttribute('data-videopop-youtube') ? 'youtube' : 'bunny');
 
       const safePlay = () => {
         const p = video.play();
@@ -797,24 +927,51 @@
         component.style.pointerEvents = 'auto';
 
         const guid = player.getAttribute('data-videopop-id');
+        const ytId = player.getAttribute('data-videopop-youtube');
 
         // Reflect the video in the address bar. A video has no page of its own,
         // so this is a query param on whatever page is showing rather than a
-        // path — see the header note in popuprouter.js.
-        if (guid && !window.__popupRouter?.isSuppressed()) {
-          currentGuid = guid;
+        // path — see the header note in popuprouter.js. YouTube ids share the
+        // same param under a `yt:` prefix: one param, one router kind, and the
+        // 11-char id charset can never collide with a Bunny UUID.
+        const watchId = ytId ? `yt:${ytId}` : guid;
+        // What the popup is SHOWING, tracked however it was opened. The router
+        // drives a cold-link restore inside runSuppressed(), so isSuppressed()
+        // is true on that path — gating this assignment on it (as the history
+        // write below rightly is) left currentGuid null for restored popups,
+        // and closePopup's `if (hadGuid)` then skipped router.close() entirely.
+        // The overlay hid, the URL kept ?watch=, and `current` stayed set in
+        // the router, which poisoned every later open/close cycle.
+        currentGuid = watchId || null;
+
+        // Only the history WRITE is suppressed: during a restore the address
+        // bar already shows this video, so re-writing it would push a
+        // duplicate entry over the one the visitor landed on.
+        if (watchId && !window.__popupRouter?.isSuppressed()) {
           const url = new URL(window.location.href);
-          url.searchParams.set('watch', guid);
-          window.__popupRouter?.open('video', { guid: guid }, url.href);
+          url.searchParams.set('watch', watchId);
+          window.__popupRouter?.open('video', { guid: watchId }, url.href);
         }
 
-        if (guid) {
-          setPosterAndPrefetch();
+        if (ytId) {
+          // Hand off to YouTube entirely: park the <video> so a previously
+          // played Bunny clip cannot keep running behind the iframe.
+          video.pause();
+          destroyHls();
+          loadedSrc = null;
+          video.removeAttribute('src');
+          video.load();
+          mountYoutube(ytId);
         } else {
-          await loadSource();
+          unmountYoutube();
+          if (guid) {
+            setPosterAndPrefetch();
+          } else {
+            await loadSource();
+          }
+          resetToStart(); // always open at 00:00
         }
 
-        resetToStart(); // always open at 00:00
         setState('paused');
         setLoading(false);
 
@@ -853,6 +1010,9 @@
           loadedSrc = null;
           video.removeAttribute('src');
           video.load();
+          // Must happen on close, not just on the next open: an iframe that
+          // keeps its src goes on playing audio behind the hidden dialog.
+          unmountYoutube();
           component.style.visibility = 'hidden';
           component.style.pointerEvents = 'none';
           resetToStart(); // rewind so the next open starts clean
@@ -882,10 +1042,18 @@
         if (hadGuid) window.__popupRouter?.close('video');
       };
 
-      // Find the opener for a given video id, so a shared ?watch= link can be
+      // Find the opener for a given ?watch= id, so a shared link can be
       // restored with the same poster/title/article-link the card would supply.
-      const findOpenerForGuid = (guid) =>
-        collectOpeners().filter((o) => readOpener(o).guid === guid)[0] || null;
+      // `yt:` ids match on the card's YouTube field, bare ids on its GUID.
+      const findOpenerForGuid = (id) => {
+        const yt = id.indexOf('yt:') === 0 ? id.slice(3) : null;
+        return (
+          collectOpeners().filter((o) => {
+            const data = readOpener(o);
+            return yt ? data.youtube === yt : data.guid === id;
+          })[0] || null
+        );
+      };
 
       window.__popupRouter?.register({
         name: 'video',
@@ -908,7 +1076,15 @@
           } else {
             // applyOpener(null) is a no-op, so seed the player directly and
             // clear the previous video's metadata rather than inheriting it.
-            player.setAttribute('data-videopop-id', state.guid);
+            const yt = state.guid.indexOf('yt:') === 0 ? state.guid.slice(3) : null;
+            if (yt) {
+              player.setAttribute('data-videopop-youtube', yt);
+              player.removeAttribute('data-videopop-id');
+            } else {
+              player.setAttribute('data-videopop-id', state.guid);
+              player.removeAttribute('data-videopop-youtube');
+            }
+            setSource(yt ? 'youtube' : 'bunny');
             player.removeAttribute('data-videopop-src');
             player.removeAttribute('data-videopop-title');
             player.removeAttribute('data-videopop-poster');
@@ -974,6 +1150,9 @@
           const warm = async () => {
             if (isOpen) return;
             applyOpener(opener);
+            // YouTube loads nothing until the popup opens — the iframe is the
+            // whole player, and mounting one per hover would autoplay it.
+            if (player.getAttribute('data-videopop-youtube')) return;
             const guid = player.getAttribute('data-videopop-id');
             if (guid) {
               setPosterAndPrefetch();
