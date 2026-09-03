@@ -513,6 +513,11 @@ ${old.textContent}
       // Invalidate any in-flight fetch so it can't paint into a closed popup.
       requestToken++;
 
+      // Stop any inline videos playing inside the popup. The detail is not an
+      // inline player, so every non-idle inline card treats this like another
+      // inline video starting and resets itself.
+      document.dispatchEvent(new CustomEvent('videoinline:play', { detail: component }));
+
       const finish = () => {
         component.style.visibility = "hidden";
         component.style.pointerEvents = "none";
