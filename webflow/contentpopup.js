@@ -313,48 +313,12 @@ ${old.textContent}
 
   document.querySelectorAll("[data-popup]").forEach((component) => {
     if (component.dataset.scriptInitialized) return;
-    component.dataset.scriptInitialized = "true";
-
-    injectSkeletonStyles();
 
     const backdrop = component.querySelector("[data-popup-backdrop]");
     const dialog = component.querySelector("[data-popup-dialog]");
     const closeButtons = component.querySelectorAll("[data-popup-close]");
     const slot = component.querySelector("[data-content-slot]");
     const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-
-    // Bail loudly rather than throwing. Without a dialog every open/close path
-    // dereferences null and the whole component dies silently.
-    if (!dialog) {
-      console.warn("[popup] no [data-popup-dialog] found", component);
-      return;
-    }
-    if (!slot) {
-      console.warn("[popup] no [data-content-slot] found", component);
-      return;
-    }
-    // Animated in several places, so it is required rather than optional —
-    // guarding each gsap call individually would be noise.
-    if (!backdrop) {
-      console.warn("[popup] no [data-popup-backdrop] found", component);
-      return;
-    }
-
-    let isOpen = false;
-    // True when this popup is the page itself, not an overlay — see the
-    // data-popup-static block below.
-    let isStatic = false;
-    let lastFocused = null;
-    // Bumped on every open; a resolved fetch whose token is stale gets dropped
-    // so a slow first click can't overwrite a fast second one.
-    let requestToken = 0;
-    // The article URL currently reflected in the address bar, so closing knows
-    // what to retract and re-opening the same one is a no-op.
-    let currentHref = null;
-
-    // Stagger targets are re-queried per open, since injected content can
-    // bring its own.
-    const getStaggerItems = () => component.querySelectorAll("[data-popup-stagger]");
 
     // --- Static popups --------------------------------------------------
     // `data-popup-static` marks a popup that IS the page rather than an
@@ -370,7 +334,15 @@ ${old.textContent}
     // No scroll lock: that exists to freeze the page *behind* an overlay.
     // Here it would pin `position: fixed` on the body with nothing left to
     // ever unlock it, trapping any content taller than the viewport.
+    //
+    // This runs BEFORE the dialog/slot/backdrop guards below and returns out.
+    // A static page has no content to inject and no overlay to dismiss, so
+    // requiring those attributes would leave its close button dead — which is
+    // exactly how a missing [data-content-slot] silently broke the Full
+    // Investigations template.
     if (component.hasAttribute("data-popup-static")) {
+      component.dataset.scriptInitialized = "true";
+
       closeButtons.forEach((btn) => {
         if (btn.dataset.popupCloseBound) return;
         btn.dataset.popupCloseBound = "true";
@@ -385,238 +357,281 @@ ${old.textContent}
         });
       });
 
-      // Cards on a static page still open overlays over it (related
-      // articles, video cards), so openers are still bound — by the
-      // bindOpeners() call at the end of this block, which every popup
-      // reaches. Only the overlay machinery in between is skipped.
-      isStatic = true;
+      // Cards on a static page still open overlays over it (related articles,
+      // video cards). Those need the overlay machinery below, which in turn
+      // needs a dialog, slot and backdrop — so they are bound only when this
+      // page actually has them. A static page missing them still closes.
+      if (dialog && slot && backdrop) initOverlay();
+      return;
     }
 
-    // CSS defaults are visible (for Designer editing). On the live site,
-    // reset to the hidden start state before any open animation runs.
-    // A static popup is meant to be visible on load, so it keeps the CSS
-    // defaults and skips this entirely.
-    if (!isStatic) {
-      component.style.visibility = "hidden";
-      component.style.pointerEvents = "none";
-      gsap.set(backdrop, { opacity: 0 });
-      gsap.set(dialog, { yPercent: 100 });
-      gsap.set(getStaggerItems(), { opacity: 0, y: "2rem" });
+    if (!dialog) {
+      console.warn("[popup] no [data-popup-dialog] found", component);
+      return;
+    }
+    if (!slot) {
+      console.warn("[popup] no [data-content-slot] found", component);
+      return;
+    }
+    // Animated in several places, so it is required rather than optional —
+    // guarding each gsap call individually would be noise.
+    if (!backdrop) {
+      console.warn("[popup] no [data-popup-backdrop] found", component);
+      return;
     }
 
-    const openPopup = () => {
-      if (isOpen) return;
-      isOpen = true;
-      lastFocused = document.activeElement;
-      window.__popupScrollLock.lock();
+    component.dataset.scriptInitialized = "true";
+    initOverlay();
 
-      component.style.visibility = "visible";
-      component.style.pointerEvents = "auto";
+    // Everything an overlay needs. Declared as a function so the static path
+    // above can opt into just the opener half without falling through the
+    // guards. Hoisted, so the early calls above are fine.
+    function initOverlay() {
+      injectSkeletonStyles();
 
-      const staggerItems = getStaggerItems();
+      let isOpen = false;
+      // True when this popup is the page itself, not an overlay: it ships
+      // already open, so the open/close and history machinery is skipped and
+      // only the openers below are bound.
+      const isStatic = component.hasAttribute("data-popup-static");
+      let lastFocused = null;
+      // Bumped on every open; a resolved fetch whose token is stale gets dropped
+      // so a slow first click can't overwrite a fast second one.
+      let requestToken = 0;
+      // The article URL currently reflected in the address bar, so closing knows
+      // what to retract and re-opening the same one is a no-op.
+      let currentHref = null;
 
-      if (reduceMotion) {
-        gsap.set(backdrop, { opacity: 1 });
-        gsap.set(dialog, { yPercent: 0 });
-        gsap.set(staggerItems, { opacity: 1, y: 0 });
-      } else {
-        const tl = gsap.timeline();
-        tl.to(backdrop, { opacity: 1, duration: 0.4, ease: "power2.out" })
-          .fromTo(
-            dialog,
-            { yPercent: 100 },
-            { yPercent: 0, duration: 0.6, ease: "power3.out" },
-            "<"
-          )
-          .fromTo(
-            staggerItems,
-            { opacity: 0, y: "2rem" },
-            { opacity: 1, y: 0, duration: 0.5, stagger: 0.08, ease: "power2.out" },
-            "-=0.3"
-          );
-      }
+      // Stagger targets are re-queried per open, since injected content can
+      // bring its own.
+      const getStaggerItems = () => component.querySelectorAll("[data-popup-stagger]");
 
-      dialog.focus();
-    };
-
-    // Open immediately with a skeleton, then swap in the real content when the
-    // fetch lands — the button never feels unresponsive.
-    const openPopupWithContent = async (href, title) => {
-      const token = ++requestToken;
-
-      // What the popup is SHOWING, tracked however it was opened. The router
-      // drives Back/Forward restores inside runSuppressed(), so isSuppressed()
-      // is true on that path — gating this on it (as the history write below
-      // rightly is) would leave currentHref null for a router-opened article,
-      // and closePopup's `if (hadHref)` would then skip router.close(),
-      // stranding the article path in the address bar.
-      if (href && href !== "#") {
-        currentHref = new URL(href, window.location.href).href;
-      }
-
-      // Reflect the article in the address bar so the view is shareable. This
-      // is the real CMS page path, so a shared link resolves to a page that is
-      // already indexed and already has its own OG tags.
-      // Skipped while the router is driving us, or it would push over the very
-      // entry it is restoring.
-      if (currentHref && !window.__popupRouter?.isSuppressed()) {
-        window.__popupRouter?.open("article", { href: currentHref }, currentHref);
-      }
-
-      if (slot) slot.innerHTML = SKELETON_HTML;
-      // Title comes in with the fetched content; kept for optional headings.
-      if (title) component.setAttribute("aria-label", title);
-
-      openPopup();
-
-      try {
-        const content = await fetchContent(href);
-        if (token !== requestToken || !isOpen) return;
-
-        if (slot) {
-          slot.innerHTML = "";
-          slot.appendChild(content);
-
-          // Scripts, sliders and players inside the injected markup are inert
-          // until this runs.
-          rehydrate(slot)
-            // Related-article links arrive with the injected content, so they
-            // still need binding to swap content in place.
-            .then(() => bindOpeners())
-            .catch((error) => console.warn("[popup] rehydrate failed:", error));
-
-          if (reduceMotion) {
-            gsap.set(content, { opacity: 1, y: 0 });
-          } else {
-            gsap.fromTo(
-              content,
-              { opacity: 0, y: "1rem" },
-              { opacity: 1, y: 0, duration: 0.4, ease: "power2.out" }
-            );
-          }
-        }
-      } catch (error) {
-        if (token !== requestToken) return;
-        console.error("[popup] content load failed:", error);
-        // Never strand the user in an empty popup — fall back to the real page.
-        window.location.href = href;
-      }
-    };
-
-    // Closes without touching history — the router calls this when the Back
-    // button (or another popup taking over) already moved the URL.
-    const closePopupSilently = () => {
-      if (!isOpen) return;
-      isOpen = false;
-      currentHref = null;
-      window.__popupScrollLock.unlock();
-      // Invalidate any in-flight fetch so it can't paint into a closed popup.
-      requestToken++;
-
-      // Stop any inline videos playing inside the popup. The detail is not an
-      // inline player, so every non-idle inline card treats this like another
-      // inline video starting and resets itself.
-      document.dispatchEvent(new CustomEvent('videoinline:play', { detail: component }));
-
-      const finish = () => {
+      // CSS defaults are visible (for Designer editing). On the live site,
+      // reset to the hidden start state before any open animation runs.
+      // A static popup is meant to be visible on load, so it keeps the CSS
+      // defaults and skips this entirely.
+      if (!isStatic) {
         component.style.visibility = "hidden";
         component.style.pointerEvents = "none";
-        if (lastFocused) lastFocused.focus();
+        gsap.set(backdrop, { opacity: 0 });
+        gsap.set(dialog, { yPercent: 100 });
+        gsap.set(getStaggerItems(), { opacity: 0, y: "2rem" });
+      }
+
+      const openPopup = () => {
+        if (isOpen) return;
+        isOpen = true;
+        lastFocused = document.activeElement;
+        window.__popupScrollLock.lock();
+
+        component.style.visibility = "visible";
+        component.style.pointerEvents = "auto";
+
+        const staggerItems = getStaggerItems();
+
+        if (reduceMotion) {
+          gsap.set(backdrop, { opacity: 1 });
+          gsap.set(dialog, { yPercent: 0 });
+          gsap.set(staggerItems, { opacity: 1, y: 0 });
+        } else {
+          const tl = gsap.timeline();
+          tl.to(backdrop, { opacity: 1, duration: 0.4, ease: "power2.out" })
+            .fromTo(
+              dialog,
+              { yPercent: 100 },
+              { yPercent: 0, duration: 0.6, ease: "power3.out" },
+              "<"
+            )
+            .fromTo(
+              staggerItems,
+              { opacity: 0, y: "2rem" },
+              { opacity: 1, y: 0, duration: 0.5, stagger: 0.08, ease: "power2.out" },
+              "-=0.3"
+            );
+        }
+
+        dialog.focus();
       };
 
-      if (reduceMotion) {
-        gsap.set(dialog, { yPercent: 100 });
-        gsap.set(backdrop, { opacity: 0 });
-        finish();
-      } else {
-        const tl = gsap.timeline({ onComplete: finish });
-        tl.to(dialog, { yPercent: 100, duration: 0.45, ease: "power3.in" })
-          .to(backdrop, { opacity: 0, duration: 0.35, ease: "power2.in" }, "<");
-      }
-    };
+      // Open immediately with a skeleton, then swap in the real content when the
+      // fetch lands — the button never feels unresponsive.
+      const openPopupWithContent = async (href, title) => {
+        const token = ++requestToken;
 
-    // The close path every user gesture goes through: retract the article URL
-    // as well as hiding the popup.
-    const closePopup = () => {
-      if (!isOpen) return;
-      const hadHref = currentHref;
-      closePopupSilently();
-      if (hadHref) window.__popupRouter?.close("article");
-    };
+        // What the popup is SHOWING, tracked however it was opened. The router
+        // drives Back/Forward restores inside runSuppressed(), so isSuppressed()
+        // is true on that path — gating this on it (as the history write below
+        // rightly is) would leave currentHref null for a router-opened article,
+        // and closePopup's `if (hadHref)` would then skip router.close(),
+        // stranding the article path in the address bar.
+        if (href && href !== "#") {
+          currentHref = new URL(href, window.location.href).href;
+        }
 
-    // A static popup has no overlay to dismiss: its close button was already
-    // bound above to leave the page, and there is no history entry of ours to
-    // retract. Registering it would also let a Back press "close" the page
-    // itself into an empty shell.
-    if (!isStatic) {
-      // Back/forward and cold-load restores are driven by the router.
-      window.__popupRouter?.register({
-        name: "article",
-        // Article URLs are real pages that render on their own, so a cold visit
-        // is left alone — see the header note in popuprouter.js.
-        restoreOnLoad: false,
-        matches: () => null,
-        open: (state) => {
-          if (state?.href) openPopupWithContent(state.href);
-        },
-        close: closePopupSilently
-      });
+        // Reflect the article in the address bar so the view is shareable. This
+        // is the real CMS page path, so a shared link resolves to a page that is
+        // already indexed and already has its own OG tags.
+        // Skipped while the router is driving us, or it would push over the very
+        // entry it is restoring.
+        if (currentHref && !window.__popupRouter?.isSuppressed()) {
+          window.__popupRouter?.open("article", { href: currentHref }, currentHref);
+        }
 
-      closeButtons.forEach((btn) => btn.addEventListener("click", closePopup));
-      backdrop.addEventListener("click", closePopup);
-      document.addEventListener("keydown", (e) => {
-        if (e.key === "Escape" && isOpen) closePopup();
-      });
-    }
+        if (slot) slot.innerHTML = SKELETON_HTML;
+        // Title comes in with the fetched content; kept for optional headings.
+        if (title) component.setAttribute("aria-label", title);
 
-    // --- Openers -----------------------------------------------------------
-    const bindOpeners = () => {
-      // One attribute for every opener, including "Related articles" rows
-      // inside injected content — clicking one swaps the popup's content
-      // instead of navigating.
-      document.querySelectorAll("[data-popup-open]").forEach((opener) => {
-        if (opener.dataset.popupBound) return;
-        opener.dataset.popupBound = "true";
+        openPopup();
 
-        opener.addEventListener("click", (e) => {
-          // Leave new-tab and middle-click intents alone; it's still a real link.
-          if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
+        try {
+          const content = await fetchContent(href);
+          if (token !== requestToken || !isOpen) return;
 
-          const href = opener.getAttribute("href");
-          if (!href || href === "#") {
-            e.preventDefault();
-            // A placeholder link inside an open popup would otherwise wipe the
-            // content that is already showing; leave it as it is.
-            if (!isOpen) openPopup();
-            return;
+          if (slot) {
+            slot.innerHTML = "";
+            slot.appendChild(content);
+
+            // Scripts, sliders and players inside the injected markup are inert
+            // until this runs.
+            rehydrate(slot)
+              // Related-article links arrive with the injected content, so they
+              // still need binding to swap content in place.
+              .then(() => bindOpeners())
+              .catch((error) => console.warn("[popup] rehydrate failed:", error));
+
+            if (reduceMotion) {
+              gsap.set(content, { opacity: 1, y: 0 });
+            } else {
+              gsap.fromTo(
+                content,
+                { opacity: 0, y: "1rem" },
+                { opacity: 1, y: 0, duration: 0.4, ease: "power2.out" }
+              );
+            }
           }
+        } catch (error) {
+          if (token !== requestToken) return;
+          console.error("[popup] content load failed:", error);
+          // Never strand the user in an empty popup — fall back to the real page.
+          window.location.href = href;
+        }
+      };
 
-          e.preventDefault();
-          const card = opener.closest("[data-card]") || opener;
-          const title =
-            opener.getAttribute("data-popup-title") ||
-            card.querySelector("[data-card-title]")?.textContent.trim();
+      // Closes without touching history — the router calls this when the Back
+      // button (or another popup taking over) already moved the URL.
+      const closePopupSilently = () => {
+        if (!isOpen) return;
+        isOpen = false;
+        currentHref = null;
+        window.__popupScrollLock.unlock();
+        // Invalidate any in-flight fetch so it can't paint into a closed popup.
+        requestToken++;
 
-          openPopupWithContent(href, title);
+        // Stop any inline videos playing inside the popup. The detail is not an
+        // inline player, so every non-idle inline card treats this like another
+        // inline video starting and resets itself.
+        document.dispatchEvent(new CustomEvent('videoinline:play', { detail: component }));
+
+        const finish = () => {
+          component.style.visibility = "hidden";
+          component.style.pointerEvents = "none";
+          if (lastFocused) lastFocused.focus();
+        };
+
+        if (reduceMotion) {
+          gsap.set(dialog, { yPercent: 100 });
+          gsap.set(backdrop, { opacity: 0 });
+          finish();
+        } else {
+          const tl = gsap.timeline({ onComplete: finish });
+          tl.to(dialog, { yPercent: 100, duration: 0.45, ease: "power3.in" })
+            .to(backdrop, { opacity: 0, duration: 0.35, ease: "power2.in" }, "<");
+        }
+      };
+
+      // The close path every user gesture goes through: retract the article URL
+      // as well as hiding the popup.
+      const closePopup = () => {
+        if (!isOpen) return;
+        const hadHref = currentHref;
+        closePopupSilently();
+        if (hadHref) window.__popupRouter?.close("article");
+      };
+
+      // A static popup has no overlay to dismiss: its close button was already
+      // bound above to leave the page, and there is no history entry of ours to
+      // retract. Registering it would also let a Back press "close" the page
+      // itself into an empty shell.
+      if (!isStatic) {
+        // Back/forward and cold-load restores are driven by the router.
+        window.__popupRouter?.register({
+          name: "article",
+          // Article URLs are real pages that render on their own, so a cold visit
+          // is left alone — see the header note in popuprouter.js.
+          restoreOnLoad: false,
+          matches: () => null,
+          open: (state) => {
+            if (state?.href) openPopupWithContent(state.href);
+          },
+          close: closePopupSilently
         });
 
-        // Warm the cache on hover so most clicks resolve instantly.
-        const warm = () => {
-          const href = opener.getAttribute("href");
-          if (href && href !== "#" && !contentCache.has(href)) {
-            fetchContent(href).catch(() => {});
-          }
-        };
-        opener.addEventListener("pointerenter", warm);
-        opener.addEventListener("focus", warm);
-      });
-    };
+        closeButtons.forEach((btn) => btn.addEventListener("click", closePopup));
+        backdrop.addEventListener("click", closePopup);
+        document.addEventListener("keydown", (e) => {
+          if (e.key === "Escape" && isOpen) closePopup();
+        });
+      }
 
-    // Exposed for videopopup.js's "Read" handoff and for CMS-loaded cards.
-    component._openPopup = openPopup;
-    component._openPopupWithContent = openPopupWithContent;
-    component._bindOpeners = bindOpeners;
+      // --- Openers -----------------------------------------------------------
+      const bindOpeners = () => {
+        // One attribute for every opener, including "Related articles" rows
+        // inside injected content — clicking one swaps the popup's content
+        // instead of navigating.
+        document.querySelectorAll("[data-popup-open]").forEach((opener) => {
+          if (opener.dataset.popupBound) return;
+          opener.dataset.popupBound = "true";
 
-    bindOpeners();
+          opener.addEventListener("click", (e) => {
+            // Leave new-tab and middle-click intents alone; it's still a real link.
+            if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
+
+            const href = opener.getAttribute("href");
+            if (!href || href === "#") {
+              e.preventDefault();
+              // A placeholder link inside an open popup would otherwise wipe the
+              // content that is already showing; leave it as it is.
+              if (!isOpen) openPopup();
+              return;
+            }
+
+            e.preventDefault();
+            const card = opener.closest("[data-card]") || opener;
+            const title =
+              opener.getAttribute("data-popup-title") ||
+              card.querySelector("[data-card-title]")?.textContent.trim();
+
+            openPopupWithContent(href, title);
+          });
+
+          // Warm the cache on hover so most clicks resolve instantly.
+          const warm = () => {
+            const href = opener.getAttribute("href");
+            if (href && href !== "#" && !contentCache.has(href)) {
+              fetchContent(href).catch(() => {});
+            }
+          };
+          opener.addEventListener("pointerenter", warm);
+          opener.addEventListener("focus", warm);
+        });
+      };
+
+      // Exposed for videopopup.js's "Read" handoff and for CMS-loaded cards.
+      component._openPopup = openPopup;
+      component._openPopupWithContent = openPopupWithContent;
+      component._bindOpeners = bindOpeners;
+
+      bindOpeners();
+    }
   });
 });
