@@ -86,6 +86,27 @@
   const WATCH = '[data-card-watch]';
   const POPUP_CARD = `${CARD}:not(${INLINE_FLAG})`;
 
+  // The whole thumbnail area, authored in Webflow on the wrapper. Clicking it
+  // does the card's main thing; the controls sitting on top keep their own.
+  const CLICK_AREA = '[data-card-click]';
+
+  // A click landing on any of these belongs to that control, not to the area.
+  // It is a list rather than a stopPropagation() at each control so a control
+  // added later inherits the behaviour with no code change here.
+  // NOTE: duplicated in videoinline.js — edit one, edit both.
+  // <video> is deliberately absent: without `controls` it has no default click
+  // behaviour, and listing it would kill click-to-pause on inline cards.
+  const INTERACTIVE =
+    'a, button, input, select, textarea, label, summary, ' +
+    '[role="button"], [role="link"], [onclick], ' +
+    '[data-card-watch], [data-popup-open], [data-videopop-open], ' +
+    '[data-videoinline-playpause], [data-videoinline-timeline], ' +
+    '[data-videoinline-volume], [data-videoinline-mute], ' +
+    '[data-videoinline-fullscreen]';
+
+  // A press that travels further than this was a scrub or a text drag.
+  const DRAG_SLOP = 6;
+
   // Give a popup-mode card its poster/preview images, which in inline mode
   // videoinline.js would have supplied. Set false if Webflow already binds
   // real images to those elements.
@@ -183,7 +204,12 @@
    * Everything the popup needs, resolved opener-first then card-second.
    */
   const readOpener = (opener) => {
-    const card = opener.closest ? opener.closest(CARD) : null;
+    // An opener is normally inside the card. A click area may sit above it
+    // (on .card_wrap), so look down as well as up — otherwise the card
+    // resolves to null and the popup opens with no GUID and no title.
+    const card = opener.closest
+      ? opener.closest(CARD) || opener.querySelector(CARD)
+      : null;
     const fromCard = (attr) => (card ? card.getAttribute(attr) : null);
     return {
       card,
@@ -324,6 +350,16 @@
     });
 
     document.querySelectorAll('[data-videopop-open]').forEach(add);
+
+    // Click areas. An area belonging to an INLINE card is skipped: that card
+    // plays in place and videoinline.js owns its area click. The area may sit
+    // on the card itself or on a wrapper above it, so test both directions.
+    document.querySelectorAll(CLICK_AREA).forEach((area) => {
+      if (area.closest(INLINE_FLAG) || area.querySelector(INLINE_FLAG)) return;
+      if (!area.closest(POPUP_CARD) && !area.querySelector(POPUP_CARD)) return;
+      add(area);
+    });
+
     return openers;
   };
 
@@ -1139,7 +1175,34 @@
           if (opener.dataset.videopopBound) return;
           opener.dataset.videopopBound = 'true';
 
+          // Guards apply only when the opener is a click area. A button IS
+          // the control, so it needs none of them.
+          const isArea = opener.matches(CLICK_AREA);
+          let downX = 0;
+          let downY = 0;
+          if (isArea) {
+            // Capture, so the coordinates are recorded even when a child
+            // stops the event bubbling.
+            opener.addEventListener(
+              'pointerdown',
+              (e) => {
+                downX = e.clientX;
+                downY = e.clientY;
+              },
+              true
+            );
+          }
+
           opener.addEventListener('click', (e) => {
+            if (isArea) {
+              if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+              if (!e.detail) return; // keyboard-synthesised click
+              if (e.target.closest(INTERACTIVE)) return; // WATCH / READ / socials
+              if (Math.abs(e.clientX - downX) > DRAG_SLOP) return;
+              if (Math.abs(e.clientY - downY) > DRAG_SLOP) return;
+              const sel = window.getSelection && window.getSelection();
+              if (sel && !sel.isCollapsed && sel.toString().trim()) return;
+            }
             e.preventDefault();
             openPopup(opener);
           });

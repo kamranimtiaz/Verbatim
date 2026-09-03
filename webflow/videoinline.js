@@ -43,6 +43,24 @@
   // Anything inside an inline card that should toggle playback.
   const PLAY_TRIGGERS = '[data-videoinline-playpause], [data-card-watch]';
 
+  // The whole thumbnail area, authored in Webflow on the wrapper. On an inline
+  // card it toggles playback in place; videopopup.js skips these deliberately.
+  const CLICK_AREA = '[data-card-click]';
+
+  // A click landing on any of these belongs to that control, not to the area.
+  // NOTE: duplicated in videopopup.js — edit one, edit both.
+  // <video> is deliberately absent: listing it would kill click-to-pause.
+  const INTERACTIVE =
+    'a, button, input, select, textarea, label, summary, ' +
+    '[role="button"], [role="link"], [onclick], ' +
+    '[data-card-watch], [data-popup-open], [data-videopop-open], ' +
+    '[data-videoinline-playpause], [data-videoinline-timeline], ' +
+    '[data-videoinline-volume], [data-videoinline-mute], ' +
+    '[data-videoinline-fullscreen]';
+
+  // A press that travels further than this was a scrub or a text drag.
+  const DRAG_SLOP = 6;
+
   const init = () => {
     // Skip the live-site reset while editing in the Webflow Designer/Editor so
     // every element stays visible and selectable on canvas.
@@ -395,6 +413,37 @@
       };
 
       playpauseButtons.forEach((btn) => btn.addEventListener('click', togglePlay));
+
+      // Whole-area click. closest() includes the element itself, so the
+      // attribute works whether it sits on .card_player or on a wrapper above.
+      // The area can live outside `player`, which is what carries the
+      // initialised flag, so it is marked separately to survive refresh().
+      const clickArea = player.closest(CLICK_AREA);
+      if (clickArea && !clickArea.dataset.videoinlineAreaBound) {
+        clickArea.dataset.videoinlineAreaBound = 'true';
+        let downX = 0;
+        let downY = 0;
+        clickArea.addEventListener(
+          'pointerdown',
+          (e) => {
+            downX = e.clientX;
+            downY = e.clientY;
+          },
+          true
+        );
+        clickArea.addEventListener('click', (e) => {
+          if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+          if (!e.detail) return; // keyboard-synthesised click
+          if (e.target.closest(INTERACTIVE)) return; // WATCH / READ / socials
+          // Released after a scrub that ended outside the timeline.
+          if (player.getAttribute('data-videoinline-drag') === 'true') return;
+          if (Math.abs(e.clientX - downX) > DRAG_SLOP) return;
+          if (Math.abs(e.clientY - downY) > DRAG_SLOP) return;
+          const sel = window.getSelection && window.getSelection();
+          if (sel && !sel.isCollapsed && sel.toString().trim()) return;
+          togglePlay();
+        });
+      }
 
       // Leaving fullscreen is only allowed for the element that owns it, and
       // only while it still does — calling exit otherwise rejects.
