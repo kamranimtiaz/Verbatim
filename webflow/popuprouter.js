@@ -28,11 +28,17 @@
  *
  * HISTORY MODEL
  * -------------
- * One popup open == exactly one pushState. Opening a second article from inside
- * an open popup replaces rather than pushes, so Back always lands on the page
- * the user came from instead of walking back through a chain of articles.
- * Everything the router pushes carries a marker in history.state, so it can
- * tell its own entries from Webflow's normal page navigations.
+ * The router owns at most ONE history entry, ever. The first open pushes it;
+ * opening a second article from inside an open popup replaces it, so Back
+ * lands on the page the user came from instead of walking back through a
+ * chain of articles. Closing does not consume the entry — it empties it in
+ * place and remembers that it is still ours, so the next open reuses it and
+ * repeated open/close cycles never stack up dead entries.
+ *
+ * Closing NEVER traverses history; see the long note on close() for why that
+ * ejected iOS visitors to about:blank. Everything the router writes carries a
+ * marker in history.state, so it can tell its own entries from Webflow's
+ * normal page navigations.
  */
 (function () {
   if (window.__popupRouter) return;
@@ -58,15 +64,19 @@
   // { kind, state, url }
   var current = null;
 
-  // True when `current` is the entry the visitor LANDED on (a shared ?watch=
-  // link opened cold), rather than one we pushed. There is nothing behind it
-  // to go back to, so closing must rewrite in place instead of calling back()
-  // — see the note in close().
-  var currentIsLanding = false;
-
   // Set while the router itself is driving a popup open/close, so the handlers
   // it calls can skip re-entering the router and pushing a second entry.
   var suppress = false;
+
+  // True when the current history entry is one we wrote and then emptied on
+  // close. The next open reuses it instead of stacking a new one, which caps
+  // the router's history footprint at exactly one entry however many popups
+  // are opened and closed.
+  //
+  // Deliberately NOT stored in history.state: state survives a reload, and a
+  // stale flag would make the first open after a refresh replace the page's
+  // own entry — Back would then leave the site instead of closing the popup.
+  var ownsCurrentEntry = false;
 
   /** True while the router is applying a URL change, so popups stay quiet. */
   function isSuppressed() {
@@ -124,72 +134,65 @@
     var payload = {};
     payload[MARKER] = entry;
 
-    // Replace when we are already showing a popup: the chain of articles a
-    // reader clicks through inside the overlay should collapse to one Back
-    // press, not one per article.
+    // Reuse the current entry whenever it is already ours, and push only when
+    // standing on a genuine page entry. Two cases are ours:
     //
-    // `current` alone is not enough to prove that. If a popup ever closes
-    // without telling us, `current` goes stale, and replacing on a stale value
-    // overwrites the last CLEAN entry — leaving nothing to go back to and
-    // making the param impossible to shed. Corroborate against history.state:
-    // a real chain has our marker on the current entry. Anything else falls
-    // through to pushState, which is always recoverable.
+    //   history.state carries our marker — a live popup. The chain of articles
+    //     a reader clicks through inside the overlay collapses to one Back
+    //     press instead of one per article.
+    //   ownsCurrentEntry — an entry we wrote and emptied on close. Reusing it
+    //     is what stops repeated open/close cycles stacking dead entries.
+    //
+    // history.state is the authoritative test, so this no longer corroborates
+    // against `current`. A stale `current` therefore cannot cause a replace
+    // over the last clean entry.
     var st = window.history.state;
-    var chaining = !!(current && st && st[MARKER] && st[MARKER].url === current.url);
-
-    if (replace || chaining) {
+    if (replace || (st && st[MARKER]) || ownsCurrentEntry) {
       window.history.replaceState(payload, '', resolved);
     } else {
       window.history.pushState(payload, '', resolved);
     }
 
+    ownsCurrentEntry = false;
     current = entry;
-    currentIsLanding = false;
   }
 
   /**
    * Announce that a popup closed. Restores the pre-popup URL.
    *
-   * Uses back() when the top history entry is one of ours, so the entry is
-   * consumed rather than left behind — otherwise closing a popup with the X and
-   * then pressing Back would re-open it.
+   * NEVER TRAVERSES HISTORY
+   * -----------------------
+   * This used to call back() to consume the entry it had pushed. That assumed
+   * the entry immediately behind was the clean pre-popup page — an assumption
+   * nothing can verify, and one iOS breaks two ways:
+   *
+   *   The YouTube <iframe> pushes into the same joint session history that
+   *     back() walks, so back() rewound the frame rather than the page. Chrome
+   *     on desktop usually discards those via its history-manipulation
+   *     intervention; iOS Chrome is WebKit and does not.
+   *   A same-document traversal completes on a later task than setTimeout(0)
+   *     on WebKit, so the old verify-and-repair timer fired mid-traversal,
+   *     concluded the close had failed, and replaceState'd the entry it was in
+   *     the middle of leaving — leaving a phantom duplicate behind.
+   *
+   * Each cycle drifted the count by one until back() walked off the front of
+   * the list and the tab fell through to about:blank, ejecting the visitor
+   * from the site. replaceState cannot navigate, so it cannot overshoot.
+   *
+   * The entry is emptied rather than consumed, and ownsCurrentEntry marks it
+   * so the next open reuses it instead of stacking another.
    */
   function close(name) {
     if (suppress) return;
     if (!current || (name && current.kind !== name)) return;
 
-    var entry = current;
-    var wasLanding = currentIsLanding;
     current = null;
-    currentIsLanding = false;
 
-    var st = window.history.state;
-    // A landing entry has nothing behind it: back() would either be ignored
-    // (leaving ?watch= in the address bar) or walk the visitor off the site.
-    // Rewrite it in place instead — Back then leaves, which is correct for a
-    // link opened cold.
-    if (wasLanding) {
-      window.history.replaceState(null, '', baseUrl);
-    } else if (st && st[MARKER] && st[MARKER].url === entry.url) {
-      // popstate fires next tick; the handler sees current === null and so
-      // does not try to close anything a second time.
-      window.history.back();
-
-      // back() is a request, not a guarantee: the entry behind may not be the
-      // clean page (a mis-tracked open can overwrite it), and Chrome's
-      // history-manipulation intervention can decline the call outright. Both
-      // strand the visitor on a popup URL. Verify on the next turn and rewrite
-      // in place if we are still dirty — `current` is null by then, so this
-      // cannot fight a popup that has legitimately reopened since.
-      var expected = entry.url;
-      window.setTimeout(function () {
-        if (current) return;
-        if (window.location.href !== expected) return;
-        window.history.replaceState(null, '', baseUrl);
-      }, 0);
-    } else {
-      window.history.replaceState(null, '', baseUrl);
-    }
+    // Also the correct behaviour for a cold-loaded shared link, which the old
+    // wasLanding branch handled with this exact call: Back then leaves the
+    // site, as it should for an entry the visitor arrived on.
+    window.history.replaceState(null, '', baseUrl);
+    ownsCurrentEntry = true;
   }
 
   /** Ask every registered popup to close, without writing history. */
@@ -206,6 +209,10 @@
   }
 
   window.addEventListener('popstate', function (event) {
+    // Any traversal lands us on a different entry, so whatever we owned before
+    // is no longer the one we are standing on.
+    ownsCurrentEntry = false;
+
     var st = event.state;
     var entry = st && st[MARKER];
 
@@ -214,7 +221,6 @@
       if (current && current.url === entry.url) return;
       closeAllSuppressed();
       current = entry;
-      currentIsLanding = false;
       var kind = kinds.filter(function (k) { return k.name === entry.kind; })[0];
       if (kind) {
         runSuppressed(function () {
@@ -229,7 +235,6 @@
     // router must not interfere.
     if (current) {
       current = null;
-      currentIsLanding = false;
       closeAllSuppressed();
     }
   });
@@ -263,7 +268,6 @@
       payload[MARKER] = { kind: kind.name, state: state, url: window.location.href };
       window.history.replaceState(payload, '', window.location.href);
       current = payload[MARKER];
-      currentIsLanding = true;
 
       // baseUrl must not keep the popup param, or closing would restore a URL
       // that immediately looks "open" again.

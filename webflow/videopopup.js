@@ -621,37 +621,43 @@
 
       const setSource = (mode) => player.setAttribute('data-videopop-source', mode);
 
-      // Built on first use and reused after — same lifecycle as the <video>,
-      // so the two players never both hold a source.
-      const mountYoutube = (id) => {
-        if (!ytFrame) {
-          ytFrame = document.createElement('iframe');
-          // Distinct from the player's `data-videopop-youtube`, which holds the
-          // id and is the mode flag — this only marks the frame element.
-          ytFrame.setAttribute('data-videopop-youtube-frame', '');
-          ytFrame.setAttribute('title', 'YouTube video player');
-          ytFrame.setAttribute('frameborder', '0');
-          ytFrame.setAttribute('allowfullscreen', '');
-          ytFrame.setAttribute(
-            'allow',
-            'accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share'
-          );
-          // Matches the <video>'s box so the CSS that sizes .videopop_video
-          // does not have to be duplicated for the frame.
-          ytFrame.style.cssText =
-            'position:absolute;inset:0;width:100%;height:100%;border:0;background:#000;';
-          video.parentNode.insertBefore(ytFrame, video.nextSibling);
-        }
-        ytFrame.src = youtubeEmbed(id);
-        ytFrame.style.display = '';
-      };
-
-      // Dropping the src is what actually stops playback — an iframe left
-      // mounted keeps playing audio behind a closed dialog.
+      // Removing the frame is what actually stops playback — an iframe left
+      // mounted keeps playing audio behind a closed dialog. It also has to go
+      // rather than just lose its src, so the next open inserts a fresh one
+      // (see mountYoutube) instead of navigating this one.
       const unmountYoutube = () => {
         if (!ytFrame) return;
-        ytFrame.removeAttribute('src');
-        ytFrame.style.display = 'none';
+        ytFrame.remove();
+        ytFrame = null;
+      };
+
+      // Built fresh on every open, NOT reused. Reassigning src on an iframe
+      // that is already in the DOM navigates it, and a child-frame navigation
+      // pushes an entry into the joint session history — the same list the
+      // Back button walks. Each YouTube open would then cost the visitor an
+      // extra Back press that rewinds the frame instead of closing the popup.
+      // Building the element, giving it its src, and only then inserting it
+      // makes the load the frame's initial navigation, which pushes nothing.
+      const mountYoutube = (id) => {
+        unmountYoutube();
+
+        ytFrame = document.createElement('iframe');
+        // Distinct from the player's `data-videopop-youtube`, which holds the
+        // id and is the mode flag — this only marks the frame element.
+        ytFrame.setAttribute('data-videopop-youtube-frame', '');
+        ytFrame.setAttribute('title', 'YouTube video player');
+        ytFrame.setAttribute('frameborder', '0');
+        ytFrame.setAttribute('allowfullscreen', '');
+        ytFrame.setAttribute(
+          'allow',
+          'accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share'
+        );
+        // Matches the <video>'s box so the CSS that sizes .videopop_video
+        // does not have to be duplicated for the frame.
+        ytFrame.style.cssText =
+          'position:absolute;inset:0;width:100%;height:100%;border:0;background:#000;';
+        ytFrame.src = youtubeEmbed(id);
+        video.parentNode.insertBefore(ytFrame, video.nextSibling);
       };
 
       const resetToStart = () => {
